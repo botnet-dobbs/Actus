@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
     app_name: str = "Actus"
+    app_version: str = "0.1.0"
     debug: bool = False
     secret_key: str = "change-me-in-production"
     database_url: str = "sqlite:///./actus.db"
@@ -13,6 +14,8 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    cors_origins: list[str] = ["*"]
+    cors_allow_credentials: bool = False
     access_token_expire_minutes: int = 60
     algorithm: str = "HS256"
     # Retry settings
