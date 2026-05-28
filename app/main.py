@@ -9,6 +9,8 @@ from app.llm.router import router as llm_router
 from app.ontology.router import router as ontology_router
 from app.auth.router import router as auth_router
 from app.agents.builder import load_agents
+from app.automation.router import router as automation_router
+from app.automation.scheduler import start_scheduler, stop_scheduler
 from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 import structlog
@@ -34,14 +36,19 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import app.llm.pii  # noqa: F401 — Presidio NLP model load, controls when the 2-3s cost is paid
+    from app.llm import pii  # noqa: F401 — Presidio NLP model load, controls when the 2-3s cost is paid
     create_db_and_tables()
     try:
         load_agents()
     except Exception as e:
         log.error("agent_load_failed_at_startup", error=str(e))
         raise
+
+    start_scheduler()
+
     yield
+
+    stop_scheduler()
 
 
 def create_app() -> FastAPI:
@@ -61,6 +68,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+    app.include_router(automation_router, prefix="/automation", tags=["Automation"])
     app.include_router(llm_router, prefix="/llm", tags=["LLM"])
     app.include_router(ontology_router, prefix="/ontology", tags=["Ontology"])
 
