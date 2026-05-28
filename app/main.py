@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
 from app.config import get_settings
 from app.database import create_db_and_tables, get_session
+from app.llm.router import router as llm_router
 from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 import structlog
@@ -26,6 +27,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import app.llm.pii  # triggers Presidio NLP model load at startup
     create_db_and_tables()
     yield
 
@@ -45,6 +47,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 
     @app.get("/healthz", tags=["Health"])
     async def health(session: Session = Depends(get_session)):
