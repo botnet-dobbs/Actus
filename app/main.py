@@ -8,10 +8,15 @@ from app.database import create_db_and_tables, get_session
 from app.llm.router import router as llm_router
 from app.ontology.router import router as ontology_router
 from app.auth.router import router as auth_router
+from app.agents.builder import load_agents
 from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 import structlog
 import uuid
+
+# Side-effect imports: register SQLModel table metadata before create_db_and_tables()
+import app.ontology.models  # noqa: F401
+import app.auth.models      # noqa: F401
 
 log = structlog.get_logger()
 
@@ -29,10 +34,13 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import app.llm.pii       # triggers Presidio NLP model load at startup
-    import app.ontology.models  # registers all ontology types before table creation
-    import app.auth.models   # registers User and AuditLog tables
+    import app.llm.pii  # noqa: F401 — Presidio NLP model load, controls when the 2-3s cost is paid
     create_db_and_tables()
+    try:
+        load_agents()
+    except Exception as e:
+        log.error("agent_load_failed_at_startup", error=str(e))
+        raise
     yield
 
 
