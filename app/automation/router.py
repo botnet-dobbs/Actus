@@ -1,37 +1,58 @@
 import asyncio
 import json
 from datetime import datetime, timezone
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from sqlmodel import Session
-from app.agents.builder import get_agent
+from typing import Annotated
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
+from sqlmodel import Session, select
+from app.agents.audit import log_agent_run
+from app.agents.builder import get_agent, list_agents, reload_agents
 from app.agents.orchestrator import run_agent
 from app.auth.models import User
 from app.auth.jwt import require_role, write_audit_log
 from app.context.models import Workflow, WorkflowStatus
-from app.database import get_engine
+from app.database import get_engine, get_session
 import structlog
 
 log = structlog.get_logger()
 router = APIRouter()
 
 
-async def _run_workflow(workflow_id: int) -> None:
+class WorkflowResponse(BaseModel):
+    id: int
+    name: str
+    agent_id: str
+    status: str
+    run_id: str | None
+    result_json: str | None
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_by: int | None
+
+
+async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: str | None) -> None:
+    started_at = datetime.now(timezone.utc)
     with Session(get_engine()) as session:
         wf = session.get(Workflow, workflow_id)
         wf.status = WorkflowStatus.running
-        wf.started_at = datetime.now(timezone.utc)
+        wf.started_at = started_at
         session.add(wf)
         session.commit()
 
     status = WorkflowStatus.failed
+    outcome = "error"
     result = None
     error = None
     try:
         config = get_agent(wf.agent_id)
         result = await run_agent(config)
         status = WorkflowStatus.completed
+        outcome = result.get("status", "success")
     except asyncio.TimeoutError:
         status = WorkflowStatus.timeout
+        outcome = "timeout"
         error = "Agent run timed out"
         log.error("workflow_timeout", workflow_id=workflow_id, agent_id=wf.agent_id)
     except Exception as e:
@@ -49,6 +70,26 @@ async def _run_workflow(workflow_id: int) -> None:
             session.add(wf)
             session.commit()
 
+        raw_result = result.get("result") if result else None
+        summary = str(raw_result)[:500] if raw_result else None
+        log_agent_run(
+            run_id=result.get("run_id", "") if result else "",
+            started_at=started_at,
+            model=result.get("model") if result else None,
+            pii_detected=result.get("pii_detected", False) if result else False,
+            prompt_tokens=result.get("prompt_tokens", 0) if result else 0,
+            completion_tokens=result.get("completion_tokens", 0) if result else 0,
+            total_tokens=result.get("total_tokens", 0) if result else 0,
+            outcome=outcome,
+            tool_calls=result.get("tool_calls") if result else None,
+            agent_id=wf.agent_id,
+            triggered_by=triggered_by,
+            result_summary=summary,
+            ip_address=ip_address,
+        )
+
+
+# ── Trigger ───────────────────────────────────────────────────────────────────
 
 @router.post("/trigger/{agent_id}", status_code=202)
 async def trigger_agent(
@@ -69,9 +110,9 @@ async def trigger_agent(
         session.refresh(wf)
         workflow_id = wf.id
 
-    background_tasks.add_task(_run_workflow, workflow_id)
-
     ip = request.client.host if request.client else None
+    background_tasks.add_task(_run_workflow, workflow_id, user.id, ip)
+
     write_audit_log(
         username=user.username,
         action="agent_trigger",
@@ -81,3 +122,45 @@ async def trigger_agent(
     )
 
     return {"status": "queued", "agent_id": agent_id, "workflow_id": workflow_id}
+
+
+# ── Workflow polling ───────────────────────────────────────────────────────────
+
+@router.get("/workflows", response_model=list[WorkflowResponse])
+async def list_workflows(
+    agent_id: Annotated[str | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    session: Session = Depends(get_session),
+    _: User = Depends(require_role("analyst")),
+):
+    query = select(Workflow).where(Workflow.status != None)  # noqa: E711
+    if agent_id:
+        query = query.where(Workflow.agent_id == agent_id)
+    if status:
+        query = query.where(Workflow.status == status)
+    query = query.order_by(Workflow.created_at.desc()).offset(offset).limit(limit)
+    return session.exec(query).all()
+
+
+@router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)
+async def get_workflow(
+    workflow_id: int,
+    session: Session = Depends(get_session),
+    _: User = Depends(require_role("analyst")),
+):
+    wf = session.get(Workflow, workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    return wf
+
+
+# ── Reload agents ─────────────────────────────────────────────────────────────
+
+@router.post("/reload")
+async def reload(user: User = Depends(require_role("admin"))):
+    reload_agents()
+    agents = list_agents()
+    log.info("agents_reloaded", count=len(agents), triggered_by=user.username)
+    return {"loaded": len(agents), "agents": [a.id for a in agents]}

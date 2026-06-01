@@ -64,9 +64,11 @@ async def _run_agent_inner(
     tools_desc = json.dumps(list(_tool_schemas.values()), indent=2)
     messages = [{"role": "system", "content": config.system_prompt + TOOL_CALL_PROMPT.format(tools=tools_desc)}]
 
+    pii_detected = False
     if extra_context:
         context_str = json.dumps(extra_context)
         clean_context, pii_found = scrub_pii(context_str)
+        pii_detected = pii_found
         if pii_found:
             bound_log.warning("agent_context_pii_scrubbed")
         messages.append({"role": "user", "content": f"Context: {clean_context}"})
@@ -75,6 +77,8 @@ async def _run_agent_inner(
     tool_calls_log: list[dict] = []
     iterations_used = 0
     total_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
 
     api_base = _settings.ollama_base_url if "ollama" in config.model else None
 
@@ -94,17 +98,25 @@ async def _run_agent_inner(
         except Exception as e:
             bound_log.error("llm_call_failed", iteration=iteration, error=str(e))
             save_context(context)
-            return {"run_id": run_id, "result": None,
-                    "iterations": iterations_used, "status": "error", "error": str(e)}
+            return {"run_id": run_id, "result": None, "iterations": iterations_used,
+                    "status": "error", "error": str(e),
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+                    "pii_detected": pii_detected}
 
         if response.usage:
             total_tokens += response.usage.total_tokens
+            prompt_tokens += getattr(response.usage, "prompt_tokens", 0) or 0
+            completion_tokens += getattr(response.usage, "completion_tokens", 0) or 0
             if total_tokens > config.token_budget:
                 bound_log.warning("agent_token_budget_exceeded",
                                   total_tokens=total_tokens, budget=config.token_budget)
                 save_context(context)
                 return {"run_id": run_id, "result": "Token budget exceeded",
-                        "iterations": iterations_used, "total_tokens": total_tokens, "status": "incomplete"}
+                        "iterations": iterations_used, "status": "incomplete",
+                        "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+                        "pii_detected": pii_detected}
 
         raw_content = response.choices[0].message.content
         content = (raw_content or "").strip()
@@ -115,14 +127,20 @@ async def _run_agent_inner(
         except json.JSONDecodeError:
             bound_log.warning("llm_non_json_response", iteration=iteration)
             save_context(context)
-            return {"run_id": run_id, "result": content,
-                    "iterations": iterations_used, "status": "completed"}
+            return {"run_id": run_id, "result": content, "iterations": iterations_used,
+                    "status": "completed",
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+                    "pii_detected": pii_detected}
 
         if action.get("done"):
             bound_log.info("agent_run_complete", iterations=iterations_used, total_tokens=total_tokens)
             save_context(context)
             return {"run_id": run_id, "result": action.get("result"),
-                    "iterations": iterations_used, "total_tokens": total_tokens, "status": "completed"}
+                    "iterations": iterations_used, "status": "completed",
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+                    "pii_detected": pii_detected}
 
         if "tool" in action:
             tool_name = action["tool"]
@@ -145,7 +163,10 @@ async def _run_agent_inner(
     bound_log.warning("agent_max_iterations_reached", iterations=iterations_used, total_tokens=total_tokens)
     save_context(context)
     return {"run_id": run_id, "result": "Max iterations reached",
-            "iterations": iterations_used, "total_tokens": total_tokens, "status": "incomplete"}
+            "iterations": iterations_used, "status": "incomplete",
+            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+            "pii_detected": pii_detected}
 
 
 async def run_agent_with_timeout(config: AgentConfig, extra_context: dict | None = None) -> dict:

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Annotated
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
@@ -27,6 +28,12 @@ class RoleUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: str
+
+
+class PasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str
 
 
 class TokenResponse(BaseModel):
@@ -151,4 +158,62 @@ async def assign_role(
 
     log.info("role_assigned", by=admin.username, target=target.username, role=req.role)
     write_audit_log(username=admin.username, action="assign_role", resource=target.username, success=True, detail=req.role)
+    return target
+
+
+@router.get("/users", response_model=list[UserResponse])
+async def list_users(
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    session: Session = Depends(get_session),
+    _: User = Depends(require_role("admin")),
+):
+    return session.exec(
+        select(User).where(User.is_deleted == False).offset(offset).limit(limit)
+    ).all()
+
+
+@router.delete("/users/{user_id}", status_code=204)
+async def delete_user(
+    user_id: int,
+    session: Session = Depends(get_session),
+    admin: User = Depends(require_role("admin")),
+):
+    target = session.exec(
+        select(User).where(User.id == user_id, User.is_deleted == False)
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == admin.id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+    target.soft_delete(deleted_by=admin.id)
+    session.add(target)
+    session.commit()
+
+    log.info("user_deleted", by=admin.username, target=target.username)
+    write_audit_log(username=admin.username, action="delete_user", resource=target.username, success=True)
+
+
+@router.patch("/users/{user_id}/password", response_model=UserResponse)
+async def reset_password(
+    user_id: int,
+    req: PasswordResetRequest,
+    session: Session = Depends(get_session),
+    admin: User = Depends(require_role("admin")),
+):
+    target = session.exec(
+        select(User).where(User.id == user_id, User.is_deleted == False)
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target.hashed_password = hash_password(req.new_password)
+    target.touch()
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+
+    log.info("password_reset", by=admin.username, target=target.username)
+    write_audit_log(username=admin.username, action="reset_password", resource=target.username, success=True)
     return target

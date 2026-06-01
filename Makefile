@@ -1,6 +1,12 @@
 test:
 	uv run python -m pytest tests/ -v
 
+migrate:
+	uv run alembic upgrade head
+
+migrations:
+	uv run alembic revision --autogenerate -m "$(msg)"
+
 # ── Docker ────────────────────────────────────────────────────────────────────
 
 docker-build:

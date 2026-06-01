@@ -4,13 +4,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
 from app.config import get_settings
-from app.database import create_db_and_tables, get_session
+from app.database import get_session
 from app.llm.router import router as llm_router
 from app.ontology.router import router as ontology_router
 from app.auth.router import router as auth_router
 from app.agents.builder import load_agents
 from app.automation.router import router as automation_router
-from app.automation.scheduler import start_scheduler, stop_scheduler
+from app.automation.scheduler import scheduler, start_scheduler, stop_scheduler
 from app.observability.logging import configure_logging
 from app.observability.metrics import instrument_app
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -21,6 +21,7 @@ import uuid
 # Side-effect imports: register SQLModel table metadata before create_db_and_tables()
 import app.ontology.models  # noqa: F401
 import app.auth.models      # noqa: F401
+import app.agents.audit     # noqa: F401
 
 _settings = get_settings()
 
@@ -46,7 +47,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     configure_logging(debug=_settings.debug)
     from app.llm import pii  # noqa: F401 — Presidio NLP model load, controls when the 2-3s cost is paid
-    create_db_and_tables()
     try:
         load_agents()
     except Exception as e:
@@ -95,6 +95,7 @@ def create_app() -> FastAPI:
                 checks["ollama"] = "ok" if r.status_code == 200 else "unreachable"
         except Exception:
             checks["ollama"] = "unreachable"
+        checks["scheduler"] = "ok" if scheduler.running else "stopped"
         status = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
         code = 200 if status == "ok" else 503
         return JSONResponse({"status": status, "checks": checks}, status_code=code)

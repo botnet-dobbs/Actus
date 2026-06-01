@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 from app.config import get_settings
@@ -23,6 +23,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
 ) -> User:
@@ -43,6 +44,7 @@ async def get_current_user(
         raise exc
     if user.is_locked():
         raise HTTPException(status_code=403, detail="Account temporarily locked")
+    request.state.user_id = user.id
     return user
 
 

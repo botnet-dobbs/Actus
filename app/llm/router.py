@@ -16,7 +16,14 @@ import structlog
 
 log = structlog.get_logger()
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+
+
+def _get_user_id_or_ip(request: Request) -> str:
+    user_id = getattr(request.state, "user_id", None)
+    return str(user_id) if user_id else get_remote_address(request)
+
+
+limiter = Limiter(key_func=_get_user_id_or_ip)
 
 _settings = get_settings()
 
