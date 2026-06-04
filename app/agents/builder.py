@@ -21,6 +21,8 @@ class AgentConfig(BaseModel):
     tools: list[str] = []
     context: dict = {}
     token_budget: int = 10_000
+    rag_query_template: str = ""
+    rag_top_k: int = 5
     schedule: AgentSchedule | None = None
 
 

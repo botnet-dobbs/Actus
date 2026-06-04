@@ -47,6 +47,8 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     configure_logging(debug=_settings.debug)
     from app.llm import pii  # noqa: F401 — Presidio NLP model load, controls when the 2-3s cost is paid
+    from app.rag.embedder import warmup as warmup_embedder
+    warmup_embedder()
     try:
         load_agents()
     except Exception as e:

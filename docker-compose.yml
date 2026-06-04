@@ -10,6 +10,7 @@ services:
       DEBUG: ${DEBUG:-false}
     volumes:
       - ./config/agents:/app/config/agents
+      - ./data/chroma:/app/data/chroma
     depends_on:
       ollama:
         condition: service_started

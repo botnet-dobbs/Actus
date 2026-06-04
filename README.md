@@ -1,8 +1,12 @@
 # Actus
 
-**FastAPI-based multi-agent platform with LLM routing, RAG-ready context engineering, and operational automation.**
+**FastAPI-based multi-agent platform with LLM routing, RAG-powered context retrieval, and operational automation.**
 
-Actus is infrastructure for AI agents that do real work, not a chatbot wrapper. Define agents in YAML, connect them to your data, give them tools, and run them on a schedule or on demand. You own the code. You control what data the agents see and what they are allowed to do.
+Actus is an internal automation platform. Deploy it, register agents for your operations, and let them work autonomously on your data. A self-hosted infrastructure layer your team owns and controls.
+
+Define agents in YAML for whatever you need to automate: analyse customer data, monitor servers, digest logs, process documents, generate reports. Each agent runs on a schedule or on demand, calls your internal tools, and reads your domain knowledge through RAG. Multiple agents run independently.
+
+Actus provides the platform, you bring the tools. A tool is a Python function decorated with `@tool` that connects an agent to your systems: your database, your APIs, your filesystem. The platform handles the agent loop, retries, timeouts, PII scrubbing, and observability. You write the functions that do the actual work.
 
 ---
 

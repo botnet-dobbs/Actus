@@ -94,3 +94,11 @@ async def run_tool(name: str, timeout_seconds: float = 30.0, **kwargs) -> ToolRe
 
 def list_tools() -> list[dict]:
     return list(_tool_schemas.values())
+
+
+# ── Built-in tools ────────────────────────────────────────────────────────────
+
+@tool("semantic_search", "Search ontology objects by semantic similarity to a natural-language query")
+def semantic_search(query: str, type_name: str = "", top_k: int = 5) -> list[dict]:
+    from app.rag.retriever import retrieve
+    return retrieve(query, type_name=type_name or None, top_k=top_k)

@@ -4,6 +4,9 @@ test:
 migrate:
 	uv run alembic upgrade head
 
+backfill-rag:
+	uv run python scripts/backfill_rag.py
+
 migrations:
 	uv run alembic revision --autogenerate -m "$(msg)"
 

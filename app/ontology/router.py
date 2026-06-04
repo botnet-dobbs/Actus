@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlmodel import Session, select
 from app.database import get_session
 from app.ontology.registry import get_type, list_types
 from app.auth.models import User
 from app.auth.jwt import get_current_user, write_audit_log
+from app.rag.indexer import delete_from_index, index_object
 import structlog
 
 log = structlog.get_logger()
@@ -54,6 +55,7 @@ def create_object(
     type_name: str,
     payload: dict,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
@@ -80,6 +82,7 @@ def create_object(
         session.rollback()
         log.error("ontology_create_failed", type=type_name, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
+    background_tasks.add_task(index_object, type_name, obj.id, obj)
     ip = request.client.host if request.client else None
     write_audit_log(username=user.username, action="ontology_create", resource=f"{type_name}:{obj.id}", ip=ip)
     log.info("ontology_object_created", type=type_name, id=obj.id, by=user.username)
@@ -92,6 +95,7 @@ def update_object(
     object_id: int,
     payload: dict,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
@@ -116,6 +120,7 @@ def update_object(
         session.rollback()
         log.error("ontology_update_failed", type=type_name, id=object_id, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
+    background_tasks.add_task(index_object, type_name, obj.id, obj)
     ip = request.client.host if request.client else None
     write_audit_log(username=user.username, action="ontology_update", resource=f"{type_name}:{object_id}", ip=ip)
     log.info("ontology_object_updated", type=type_name, id=object_id, by=user.username)
@@ -127,6 +132,7 @@ def delete_object(
     type_name: str,
     object_id: int,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
@@ -140,6 +146,7 @@ def delete_object(
     obj.soft_delete(deleted_by=user.id)
     session.add(obj)
     session.commit()
+    background_tasks.add_task(delete_from_index, type_name, object_id)
     ip = request.client.host if request.client else None
     write_audit_log(username=user.username, action="ontology_delete", resource=f"{type_name}:{object_id}", ip=ip)
     log.info("ontology_object_deleted", type=type_name, id=object_id, by=user.username)

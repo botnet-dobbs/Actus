@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Retry settings
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0
+    # RAG
+    chroma_path: str = "./data/chroma"
+    embedding_model: str = "all-MiniLM-L6-v2"
 
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":

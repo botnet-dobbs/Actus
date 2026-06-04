@@ -4,8 +4,9 @@ import json
 import structlog
 from app.agents.builder import AgentConfig
 from app.agents.tools import run_tool, _tool_schemas
-from app.context.models import AgentContext
+from app.context.models import AgentContext, ContextualData
 from app.context.store import save_context
+from app.rag.retriever import retrieve
 from app.config import get_settings
 from app.llm.pii import scrub_pii
 from app.llm.router import call_llm_with_retry
@@ -26,6 +27,17 @@ To call a tool:
 To finish:
 {{"done": true, "result": "your final answer"}}
 """
+
+
+def _build_rag_query(config: AgentConfig, extra_context: dict | None) -> str | None:
+    if config.rag_query_template:
+        try:
+            return config.rag_query_template.format(**(extra_context or {}))
+        except KeyError:
+            return config.rag_query_template
+    if extra_context and "query" in extra_context:
+        return str(extra_context["query"])
+    return None
 
 
 def extract_json(content: str) -> str:
@@ -65,6 +77,34 @@ async def _run_agent_inner(
     messages = [{"role": "system", "content": config.system_prompt + TOOL_CALL_PROMPT.format(tools=tools_desc)}]
 
     pii_detected = False
+
+    # Path 2: pre-loop RAG retrieval — seeds context before the first LLM call
+    rag_query = _build_rag_query(config, extra_context)
+    if rag_query:
+        try:
+            retrieved = retrieve(rag_query, top_k=config.rag_top_k)
+            if retrieved:
+                raw_text = "\n".join(
+                    f"[{i+1}] {r['document']} (score: {r['score']})"
+                    for i, r in enumerate(retrieved)
+                )
+                clean_text, pii_found = scrub_pii(raw_text)
+                if pii_found:
+                    bound_log.warning("rag_context_pii_scrubbed")
+                    pii_detected = True
+                messages.append({
+                    "role": "user",
+                    "content": f"Retrieved context (pre-loaded):\n{clean_text}",
+                })
+                context.data.append(ContextualData(
+                    type="retrieved_documents",
+                    object_ids=[r["metadata"].get("object_id", 0) for r in retrieved],
+                    data=retrieved,
+                ))
+                bound_log.info("rag_context_loaded", count=len(retrieved), query=rag_query)
+        except Exception as e:
+            bound_log.warning("rag_context_failed", error=str(e))
+
     if extra_context:
         context_str = json.dumps(extra_context)
         clean_context, pii_found = scrub_pii(context_str)

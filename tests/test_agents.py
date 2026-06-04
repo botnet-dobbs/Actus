@@ -1,7 +1,7 @@
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from app.agents.orchestrator import extract_json, run_agent
+from app.agents.orchestrator import extract_json, run_agent, _build_rag_query
 from app.agents.builder import AgentConfig
 from app.agents.tools import ToolResult
 
@@ -159,3 +159,62 @@ async def test_unauthorised_tool_not_executed():
         result = await run_agent(make_config(tools=["search"]))
     mock_run.assert_not_called()
     assert result["status"] == "completed"
+
+
+# ── Path 2: pre-loop RAG context injection ────────────────────────────────────
+
+def test_build_rag_query_static_template():
+    config = make_config(rag_query_template="overdue invoices unpaid")
+    assert _build_rag_query(config, None) == "overdue invoices unpaid"
+
+
+def test_build_rag_query_dynamic_template():
+    config = make_config(rag_query_template="invoices for client {client}")
+    assert _build_rag_query(config, {"client": "Acme"}) == "invoices for client Acme"
+
+
+def test_build_rag_query_template_missing_var_uses_raw():
+    config = make_config(rag_query_template="invoices for {client}")
+    assert _build_rag_query(config, {}) == "invoices for {client}"
+
+
+def test_build_rag_query_fallback_to_extra_context_query():
+    config = make_config(rag_query_template="")
+    assert _build_rag_query(config, {"query": "at-risk customers"}) == "at-risk customers"
+
+
+def test_build_rag_query_no_template_no_query():
+    config = make_config(rag_query_template="")
+    assert _build_rag_query(config, {"region": "EU"}) is None
+    assert _build_rag_query(config, None) is None
+
+
+@pytest.mark.asyncio
+async def test_rag_context_preloaded_into_messages():
+    retrieved = [{"document": "Customer name=Alice segment=enterprise", "metadata": {"type": "Customer", "object_id": 1}, "score": 0.92}]
+    with patch("app.agents.orchestrator.retrieve", return_value=retrieved), \
+         patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(
+            make_config(rag_query_template="enterprise customers"),
+            extra_context=None,
+        )
+    assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_rag_context_failure_is_non_fatal():
+    with patch("app.agents.orchestrator.retrieve", side_effect=Exception("chroma unavailable")), \
+         patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(rag_query_template="find something"))
+    assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_rag_no_template_skips_retrieval():
+    with patch("app.agents.orchestrator.retrieve") as mock_retrieve, \
+         patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         patch("app.agents.orchestrator.save_context"):
+        await run_agent(make_config())
+    mock_retrieve.assert_not_called()

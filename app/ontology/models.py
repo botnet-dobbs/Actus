@@ -4,6 +4,24 @@ from app.ontology.registry import register
 
 
 class OntologyObjectBase(SQLModel):
+    """
+    Base class for all ontology types. Provides audit fields, soft delete,
+    and RAG indexing (automatic on create/update via the ontology router).
+
+    To define a new type:
+
+        @register("Invoice")
+        class Invoice(OntologyObjectBase, table=True):
+            id: int | None = Field(default=None, primary_key=True)
+            number: str = Field(unique=True, index=True)
+            client: str
+            amount: float
+            status: str = "unpaid"
+
+    Then run:
+        make migrations msg="add_invoice"
+        make migrate
+    """
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: int | None = None
@@ -20,6 +38,12 @@ class OntologyObjectBase(SQLModel):
         self.deleted_by = deleted_by
 
 
+# ── Example types — replace with your own domain models ──────────────────────
+#
+# These are illustrative. Delete them and define types that match your domain.
+# Each type gets full CRUD endpoints at /ontology/objects/{type_name} and is
+# automatically indexed into RAG on create/update.
+
 @register("Customer")
 class Customer(OntologyObjectBase, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -27,30 +51,3 @@ class Customer(OntologyObjectBase, table=True):
     email: str = Field(unique=True)
     segment: str | None = None
     is_active: bool = True
-
-
-@register("Machine")
-class Machine(OntologyObjectBase, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    serial_number: str = Field(unique=True)
-    location: str
-    model_name: str
-
-
-@register("MachineReading")
-class MachineReading(OntologyObjectBase, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    machine_id: int = Field(foreign_key="machine.id", index=True)
-    temperature: float
-    pressure: float
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-@register("AnalysisReport")
-class AnalysisReport(OntologyObjectBase, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str
-    content: str
-    source_type: str
-    source_ids: str
-    status: str = "draft"

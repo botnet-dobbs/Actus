@@ -13,6 +13,10 @@ RUN uv sync --frozen --no-dev
 # Without this, the first request pays the 2-3s model load cost
 RUN uv run python -m spacy download en_core_web_lg
 
+# Download the sentence-transformers embedding model at build time
+# Without this, the first warmup() call downloads ~80 MB on first start
+RUN uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Copy application code and agent config
 COPY app/ app/
 COPY config/ config/
