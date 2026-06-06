@@ -1,4 +1,3 @@
-import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Annotated
@@ -7,7 +6,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 from app.agents.audit import log_agent_run
 from app.agents.builder import get_agent, list_agents, reload_agents
-from app.agents.orchestrator import run_agent
+from app.agents.orchestrator import run_agent_with_timeout
 from app.auth.models import User
 from app.auth.jwt import require_role, write_audit_log
 from app.context.models import Workflow, WorkflowStatus
@@ -16,6 +15,13 @@ import structlog
 
 log = structlog.get_logger()
 router = APIRouter()
+
+_OUTCOME_MAP = {
+    "completed": "success",
+    "incomplete": "incomplete",
+    "error": "error",
+    "timeout": "timeout",
+}
 
 
 class WorkflowResponse(BaseModel):
@@ -45,16 +51,12 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
     outcome = "error"
     result = None
     error = None
+    config = None
     try:
         config = get_agent(wf.agent_id)
-        result = await run_agent(config)
+        result = await run_agent_with_timeout(config)
         status = WorkflowStatus.completed
-        outcome = result.get("status", "success")
-    except asyncio.TimeoutError:
-        status = WorkflowStatus.timeout
-        outcome = "timeout"
-        error = "Agent run timed out"
-        log.error("workflow_timeout", workflow_id=workflow_id, agent_id=wf.agent_id)
+        outcome = _OUTCOME_MAP.get(result.get("status", ""), "error")
     except Exception as e:
         error = str(e)
         log.error("workflow_failed", workflow_id=workflow_id, agent_id=wf.agent_id, error=error)
@@ -75,7 +77,7 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
         log_agent_run(
             run_id=result.get("run_id", "") if result else "",
             started_at=started_at,
-            model=result.get("model") if result else None,
+            model=config.model if config else None,
             pii_detected=result.get("pii_detected", False) if result else False,
             prompt_tokens=result.get("prompt_tokens", 0) if result else 0,
             completion_tokens=result.get("completion_tokens", 0) if result else 0,
@@ -135,7 +137,7 @@ async def list_workflows(
     session: Session = Depends(get_session),
     _: User = Depends(require_role("analyst")),
 ):
-    query = select(Workflow).where(Workflow.status != None)  # noqa: E711
+    query = select(Workflow)
     if agent_id:
         query = query.where(Workflow.agent_id == agent_id)
     if status:

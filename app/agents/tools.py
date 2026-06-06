@@ -1,11 +1,20 @@
-import time
 import asyncio
+import contextvars
 import inspect
-from typing import Callable, Any, get_type_hints
+import time
+from typing import Any, Callable, get_type_hints
+
 from pydantic import BaseModel
 import structlog
 
 log = structlog.get_logger()
+
+# Tracks active agents to detect cycles and cap nesting depth
+MAX_INVOKE_DEPTH = 5
+MAX_PARALLEL_AGENTS = 10
+_invoke_stack: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "invoke_stack", default=[]
+)
 
 
 class ToolResult(BaseModel):
@@ -98,7 +107,123 @@ def list_tools() -> list[dict]:
 
 # ── Built-in tools ────────────────────────────────────────────────────────────
 
-@tool("semantic_search", "Search ontology objects by semantic similarity to a natural-language query")
+@tool("semantic_search",
+      "Search ontology objects by semantic similarity to a natural-language query")
 def semantic_search(query: str, type_name: str = "", top_k: int = 5) -> list[dict]:
     from app.rag.retriever import retrieve
     return retrieve(query, type_name=type_name or None, top_k=top_k)
+
+
+@tool("invoke_agent",
+      "Run another registered agent by ID and return its result. "
+      "Use for sequential delegation to a specialist agent.")
+async def invoke_agent(agent_id: str, query: str = "") -> dict:
+    from app.agents.builder import get_agent
+    from app.agents.orchestrator import AGENT_TOTAL_TIMEOUT, run_agent
+
+    current_stack = _invoke_stack.get()
+
+    if len(current_stack) >= MAX_INVOKE_DEPTH:
+        return {
+            "status": "error",
+            "error": f"Max agent invocation depth ({MAX_INVOKE_DEPTH}) exceeded",
+            "result": None, "confidence": None,
+        }
+    if agent_id in current_stack:
+        return {
+            "status": "error",
+            "error": f"Circular invocation detected: '{agent_id}' is already running",
+            "result": None, "confidence": None,
+        }
+    try:
+        config = get_agent(agent_id)
+    except KeyError:
+        return {"status": "error", "error": f"Unknown agent: '{agent_id}'",
+                "result": None, "confidence": None}
+
+    try:
+        full = await asyncio.wait_for(
+            run_agent(config, extra_context={"query": query} if query else None),
+            timeout=AGENT_TOTAL_TIMEOUT,
+        )
+        return {
+            "status": full.get("status"),
+            "result": full.get("result"),
+            "confidence": full.get("confidence"),
+            "error": full.get("error"),
+        }
+    except asyncio.TimeoutError:
+        log.error("invoke_agent_timeout", agent_id=agent_id)
+        return {"status": "timeout", "error": "Agent run timed out", "result": None, "confidence": None}
+    except Exception as e:
+        log.error("invoke_agent_failed", agent_id=agent_id, error=str(e))
+        return {"status": "error", "error": str(e), "result": None, "confidence": None}
+
+
+@tool("invoke_agents_parallel",
+      "Run multiple registered agents in parallel and return all results. "
+      "Use when agents are independent and can run simultaneously. "
+      "agent_ids must be a list of registered agent ID strings.")
+async def invoke_agents_parallel(agent_ids: list[str], query: str = "") -> list[dict]:
+    if not agent_ids:
+        return []
+
+    if len(agent_ids) > MAX_PARALLEL_AGENTS:
+        return [{
+            "status": "error",
+            "result": None,
+            "confidence": None,
+            "error": (f"Batch rejected: {len(agent_ids)} agents requested, "
+                      f"max is {MAX_PARALLEL_AGENTS}. Split into smaller batches."),
+        }]
+
+    current_stack = _invoke_stack.get()
+
+    if len(current_stack) >= MAX_INVOKE_DEPTH:
+        return [{"status": "error", "error": f"Max invocation depth ({MAX_INVOKE_DEPTH}) exceeded",
+                 "result": None, "confidence": None}]
+
+    async def _run_one(aid: str) -> dict:
+        from app.agents.builder import get_agent
+        from app.agents.orchestrator import AGENT_TOTAL_TIMEOUT, run_agent
+
+        if aid in current_stack:
+            return {
+                "status": "error",
+                "error": f"Circular invocation: '{aid}' is already running",
+                "result": None, "confidence": None,
+            }
+        try:
+            config = get_agent(aid)
+        except KeyError:
+            return {"status": "error", "error": f"Unknown agent: '{aid}'",
+                    "result": None, "confidence": None}
+
+        try:
+            full = await asyncio.wait_for(
+                run_agent(config, extra_context={"query": query} if query else None),
+                timeout=AGENT_TOTAL_TIMEOUT,
+            )
+            return {
+                "status": full.get("status"),
+                "result": full.get("result"),
+                "confidence": full.get("confidence"),
+                "error": full.get("error"),
+            }
+        except asyncio.TimeoutError:
+            log.error("invoke_agent_timeout", agent_id=aid)
+            return {"status": "timeout", "error": "Agent run timed out",
+                    "result": None, "confidence": None}
+        except Exception as e:
+            log.error("invoke_agent_failed", agent_id=aid, error=str(e))
+            return {"status": "error", "error": str(e), "result": None, "confidence": None}
+
+    results = await asyncio.gather(
+        *[_run_one(aid) for aid in agent_ids],
+        return_exceptions=True,
+    )
+    return [
+        r if isinstance(r, dict) else {"status": "error", "error": str(r),
+                                        "result": None, "confidence": None}
+        for r in results
+    ]

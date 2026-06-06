@@ -1,6 +1,6 @@
 import yaml
 from pathlib import Path
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import structlog
 
 log = structlog.get_logger()
@@ -15,14 +15,16 @@ class AgentConfig(BaseModel):
     name: str
     description: str = ""
     model: str = "ollama/mistral"
-    max_iterations: int = 5
-    temperature: float = 0.7
+    max_iterations: int = Field(default=5, ge=1)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     system_prompt: str = ""
     tools: list[str] = []
     context: dict = {}
-    token_budget: int = 10_000
+    token_budget: int = Field(default=10_000, ge=1)
+    max_response_tokens: int = Field(default=1024, ge=1, le=8192)
+    api_base: str = ""
     rag_query_template: str = ""
-    rag_top_k: int = 5
+    rag_top_k: int = Field(default=5, ge=1)
     schedule: AgentSchedule | None = None
 
 

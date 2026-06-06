@@ -20,7 +20,7 @@ class AgentRunLog(SQLModel, table=True):
     completion_tokens: int = 0
     total_tokens: int = 0
     tool_calls: str = Field(default="[]")  # JSON: [{tool, success, detail}]
-    outcome: str = "success"              # "success" | "error" | "timeout"
+    outcome: str = "success"              # "success" | "incomplete" | "error" | "timeout"
     result_summary: str | None = None     # first 500 chars only, never raw output
     ip_address: str | None = None
 

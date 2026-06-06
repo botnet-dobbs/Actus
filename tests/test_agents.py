@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.agents.orchestrator import extract_json, run_agent, _build_rag_query
 from app.agents.builder import AgentConfig
-from app.agents.tools import ToolResult
+from app.agents.tools import MAX_INVOKE_DEPTH, MAX_PARALLEL_AGENTS, ToolResult, _invoke_stack
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -24,10 +24,13 @@ def make_config(**kwargs) -> AgentConfig:
     return AgentConfig(**(defaults | kwargs))
 
 
-def llm_response(content: str, total_tokens: int = 100):
+def llm_response(content: str, total_tokens: int = 100,
+                 prompt_tokens: int = 60, completion_tokens: int = 40):
     r = MagicMock()
     r.choices[0].message.content = content
     r.usage.total_tokens = total_tokens
+    r.usage.prompt_tokens = prompt_tokens
+    r.usage.completion_tokens = completion_tokens
     return r
 
 
@@ -89,17 +92,32 @@ async def test_happy_path_completes():
     assert result["status"] == "completed"
     assert result["result"] == "finished"
     assert result["total_tokens"] == 100
+    assert result["prompt_tokens"] == 60
+    assert result["completion_tokens"] == 40
+    assert result["confidence"] is None  # done signal had no confidence field
 
 
 # ── run_agent: failure modes ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_non_json_response_handled_gracefully():
+async def test_non_json_response_triggers_recovery():
+    # Non-JSON followed by a valid done signal — agent recovers
+    with patch("app.agents.orchestrator.call_llm_with_retry",
+               AsyncMock(side_effect=[NON_JSON, DONE])), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(max_iterations=3))
+    assert result["status"] == "completed"
+    assert result["result"] == "finished"
+
+
+@pytest.mark.asyncio
+async def test_non_json_at_last_iteration_returns_incomplete():
+    # Non-JSON at the final iteration — returns incomplete with raw text
     with patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=NON_JSON)), \
          patch("app.agents.orchestrator.save_context"):
-        result = await run_agent(make_config())
-    assert result["status"] == "completed"
-    assert "summary" in result["result"]
+        result = await run_agent(make_config(max_iterations=1))
+    assert result["status"] == "incomplete"
+    assert "summary" in result["result"]  # raw LLM text preserved
 
 
 @pytest.mark.asyncio
@@ -218,3 +236,187 @@ async def test_rag_no_template_skips_retrieval():
          patch("app.agents.orchestrator.save_context"):
         await run_agent(make_config())
     mock_retrieve.assert_not_called()
+
+
+# ── invoke_agent and invoke_agents_parallel ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_invoke_agent_happy_path():
+    child_result = {"status": "completed", "result": "analysis done",
+                    "confidence": 0.9, "iterations": 1, "total_tokens": 50}
+    with patch("app.agents.builder.get_agent", return_value=make_config(id="child")), \
+         patch("app.agents.orchestrator.run_agent", AsyncMock(return_value=child_result)):
+        from app.agents.tools import invoke_agent
+        result = await invoke_agent(agent_id="child", query="analyse this")
+    assert result["status"] == "completed"
+    assert result["result"] == "analysis done"
+    assert result["confidence"] == 0.9
+    assert "prompt_tokens" not in result  # internal fields stripped
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_unknown_agent_returns_error():
+    with patch("app.agents.builder.get_agent", side_effect=KeyError("no-such-agent")):
+        from app.agents.tools import invoke_agent
+        result = await invoke_agent(agent_id="no-such-agent")
+    assert result["status"] == "error"
+    assert "Unknown agent" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_circular_detection():
+    # Simulate the stack already containing the target agent
+    token = _invoke_stack.set(["planner", "child-agent"])
+    try:
+        from app.agents.tools import invoke_agent
+        result = await invoke_agent(agent_id="child-agent", query="anything")
+    finally:
+        _invoke_stack.reset(token)
+    assert result["status"] == "error"
+    assert "Circular" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_depth_limit():
+    deep_stack = [f"agent-{i}" for i in range(MAX_INVOKE_DEPTH)]
+    token = _invoke_stack.set(deep_stack)
+    try:
+        from app.agents.tools import invoke_agent
+        result = await invoke_agent(agent_id="one-more")
+    finally:
+        _invoke_stack.reset(token)
+    assert result["status"] == "error"
+    assert "depth" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_invoke_agents_parallel_happy_path():
+    r1 = {"status": "completed", "result": "result-a", "iterations": 1, "total_tokens": 10}
+    r2 = {"status": "completed", "result": "result-b", "iterations": 1, "total_tokens": 10}
+    configs = {"agent-a": make_config(id="agent-a"), "agent-b": make_config(id="agent-b")}
+    with patch("app.agents.builder.get_agent", side_effect=lambda aid: configs[aid]), \
+         patch("app.agents.orchestrator.run_agent", AsyncMock(side_effect=[r1, r2])):
+        from app.agents.tools import invoke_agents_parallel
+        results = await invoke_agents_parallel(agent_ids=["agent-a", "agent-b"], query="go")
+    assert len(results) == 2
+    assert all(r["status"] == "completed" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_invoke_agents_parallel_partial_failure():
+    r_ok = {"status": "completed", "result": "ok", "iterations": 1, "total_tokens": 10}
+
+    def _get_agent(aid):
+        if aid == "good":
+            return make_config(id="good")
+        raise KeyError(aid)
+
+    with patch("app.agents.builder.get_agent", side_effect=_get_agent), \
+         patch("app.agents.orchestrator.run_agent", AsyncMock(return_value=r_ok)):
+        from app.agents.tools import invoke_agents_parallel
+        results = await invoke_agents_parallel(agent_ids=["good", "missing"])
+    assert len(results) == 2
+    statuses = {r["status"] for r in results}
+    assert "completed" in statuses
+    assert "error" in statuses
+
+
+@pytest.mark.asyncio
+async def test_invoke_agents_parallel_empty_list():
+    from app.agents.tools import invoke_agents_parallel
+    results = await invoke_agents_parallel(agent_ids=[])
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_confidence_score_passed_through():
+    done_with_confidence = llm_response('{"done": true, "result": "analysis done", "confidence": 0.92}')
+    with patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=done_with_confidence)), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config())
+    assert result["status"] == "completed"
+    assert result["confidence"] == 0.92
+
+
+@pytest.mark.asyncio
+async def test_confidence_none_when_not_provided():
+    with patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config())
+    assert result["confidence"] is None
+
+
+def test_extract_json_handles_text_before_json():
+    mixed = 'Sure! Here is my response: {"done": true, "result": "ok"}'
+    assert extract_json(mixed) == '{"done": true, "result": "ok"}'
+
+
+def test_extract_json_handles_nested_args():
+    mixed = 'Let me call a tool: {"tool": "search", "args": {"query": "test"}}'
+    result = extract_json(mixed)
+    parsed = json.loads(result)
+    assert parsed["tool"] == "search"
+    assert parsed["args"]["query"] == "test"
+
+
+def test_extract_json_handles_text_after_json():
+    mixed = '{"done": true, "result": "ok"} then I will proceed with more reasoning.'
+    result = extract_json(mixed)
+    parsed = json.loads(result)
+    assert parsed["done"] is True
+
+
+@pytest.mark.asyncio
+async def test_empty_action_sends_recovery_message():
+    empty_response = llm_response('{}')
+    with patch("app.agents.orchestrator.call_llm_with_retry",
+               AsyncMock(side_effect=[empty_response, DONE])), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(max_iterations=3))
+    assert result["status"] == "completed"
+    assert result["iterations"] == 2  # recovered on second iteration
+
+
+@pytest.mark.asyncio
+async def test_invoke_agents_parallel_cap_single_rejection():
+    from app.agents.tools import invoke_agents_parallel
+    too_many = [f"agent-{i}" for i in range(MAX_PARALLEL_AGENTS + 1)]
+    results = await invoke_agents_parallel(agent_ids=too_many)
+    assert len(results) == 1  # single rejection, not N identical errors
+    assert results[0]["status"] == "error"
+    assert "Batch rejected" in results[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_non_dict_args_do_not_crash():
+    null_args = llm_response('{"tool": "search", "args": null}')
+    with patch("app.agents.orchestrator.call_llm_with_retry",
+               AsyncMock(side_effect=[null_args, DONE])), \
+         patch("app.agents.orchestrator.run_tool",
+               AsyncMock(return_value=ToolResult(tool_name="search", success=True, output="ok"))), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(max_iterations=3))
+    assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_save_context_failure_does_not_crash_run():
+    from unittest.mock import patch as _patch
+    with patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         _patch("app.agents.orchestrator.save_context",
+                side_effect=ValueError("context too large")):
+        result = await run_agent(make_config())
+    assert result["status"] == "completed"
+    assert result["result"] == "finished"
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_no_call_stack_in_error():
+    token = _invoke_stack.set(["planner", "child"])
+    try:
+        from app.agents.tools import invoke_agent
+        result = await invoke_agent(agent_id="child")
+    finally:
+        _invoke_stack.reset(token)
+    assert result["status"] == "error"
+    assert "call_stack" not in result
