@@ -22,6 +22,7 @@ def engine():
     import app.context.store
     import app.context.models
     import app.agents.audit
+    import app.rag.models
     SQLModel.metadata.create_all(test_engine)
 
     original = db_module._engine

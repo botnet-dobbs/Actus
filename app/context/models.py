@@ -45,6 +45,8 @@ class WorkflowStatus(str, Enum):
 
 
 class Workflow(SQLModel, table=True):
+    __tablename__ = "workflows"
+
     id: int | None = Field(default=None, primary_key=True)
     name: str
     agent_id: str = Field(index=True)
@@ -56,3 +58,4 @@ class Workflow(SQLModel, table=True):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_by: int | None = None
+    extra_context_json: str | None = None

@@ -73,6 +73,50 @@ Agent YAML files in `config/agents/` are volume-mounted — add or edit agents a
 
 ---
 
+## Demo Agents
+
+Pre-built agents in `config/agents/` that demonstrate the platform's capabilities end-to-end.
+
+### Document Q&A
+
+Answers questions about uploaded PDF and DOCX files. Demonstrates: file upload → parse → chunk → vector index → semantic retrieval → grounded answer → cleanup.
+
+**Step 1 — Upload the document**
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+  -d "username=admin&password=pass" | jq -r .access_token)
+
+FILE_PATH=$(curl -s -X POST http://localhost:8000/doc-qa/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/path/to/report.pdf" | jq -r .file_path)
+```
+
+**Step 2 — Trigger the agent with the file path and your question**
+
+```bash
+WF_ID=$(curl -s -X POST http://localhost:8000/automation/trigger/doc_qa \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"extra_context\": {\"file_path\": \"$FILE_PATH\", \"question\": \"What are the main findings?\"}}" \
+  | jq -r .workflow_id)
+```
+
+**Step 3 — Poll for the result**
+
+```bash
+curl http://localhost:8000/automation/workflows/$WF_ID \
+  -H "Authorization: Bearer $TOKEN" | jq .result_json
+```
+
+**Supported formats:** `.pdf`, `.docx` — up to 20 MB per file.
+
+**How it works:** The agent calls `chunk_and_index_document` (parse + embed chunks into pgvector), then `search_document` (semantic retrieval), then composes an answer grounded in the retrieved passages, then calls `cleanup_document` to remove the session's vector index rows before signalling done.
+
+**SQLite dev mode:** Indexing and retrieval are no-ops on SQLite. The agent will respond that no document information was found — expected behaviour. Run with PostgreSQL for full functionality.
+
+---
+
 ## Documentation
 
 ## License

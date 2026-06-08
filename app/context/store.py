@@ -10,6 +10,8 @@ MAX_CONTEXT_BYTES = 512_000  # 500 KB
 
 
 class ContextSnapshot(SQLModel, table=True):
+    __tablename__ = "context_snapshots"
+
     id: int | None = Field(default=None, primary_key=True)
     agent_id: str = Field(index=True)
     run_id: str = Field(unique=True, index=True)

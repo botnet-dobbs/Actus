@@ -5,6 +5,8 @@ import bcrypt as _bcrypt
 
 
 class User(SQLModel, table=True):
+    __tablename__ = "users"
+
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
     hashed_password: str
@@ -44,6 +46,8 @@ class User(SQLModel, table=True):
 
 
 class AuditLog(SQLModel, table=True):
+    __tablename__ = "audit_logs"
+
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(index=True)
     action: str = Field(index=True)

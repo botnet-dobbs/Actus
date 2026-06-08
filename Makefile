@@ -1,3 +1,5 @@
+.PHONY: test migrate backfill-rag migrations docker-build docker-up docker-up-d ollama-pull docker-down docker-logs docker-restart docker-rebuild
+
 test:
 	uv run python -m pytest tests/ -v
 

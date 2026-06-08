@@ -11,9 +11,9 @@ VECTOR_DIM = 384  # all-MiniLM-L6-v2 output dimensions
 
 
 class VectorIndex(SQLModel, table=True):
-    __tablename__ = "vectorindex"
+    __tablename__ = "vector_indexes"
     __table_args__ = (
-        UniqueConstraint("object_type", "object_id", name="uq_vectorindex_type_id"),
+        UniqueConstraint("object_type", "object_id", name="uq_vector_indexes_type_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True)

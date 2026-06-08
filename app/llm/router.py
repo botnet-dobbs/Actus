@@ -34,7 +34,6 @@ def llm_retry(fn):
         wait=wait_exponential(multiplier=_settings.llm_retry_base_delay, min=1, max=30),
         retry=retry_if_exception_type((
             APIConnectionError,
-            Timeout,
             ServiceUnavailableError,
             RateLimitError,
         )),

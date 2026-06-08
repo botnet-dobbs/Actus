@@ -24,6 +24,10 @@ _OUTCOME_MAP = {
 }
 
 
+class TriggerRequest(BaseModel):
+    extra_context: dict | None = None
+
+
 class WorkflowResponse(BaseModel):
     id: int
     name: str
@@ -36,6 +40,7 @@ class WorkflowResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     created_by: int | None
+    extra_context_json: str | None
 
 
 async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: str | None) -> None:
@@ -46,6 +51,9 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
         wf.started_at = started_at
         session.add(wf)
         session.commit()
+        session.refresh(wf)
+        agent_id = wf.agent_id
+        extra_context_json = wf.extra_context_json
 
     status = WorkflowStatus.failed
     outcome = "error"
@@ -53,13 +61,14 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
     error = None
     config = None
     try:
-        config = get_agent(wf.agent_id)
-        result = await run_agent_with_timeout(config)
+        config = get_agent(agent_id)
+        extra_context = json.loads(extra_context_json) if extra_context_json else None
+        result = await run_agent_with_timeout(config, extra_context=extra_context)
         status = WorkflowStatus.completed
         outcome = _OUTCOME_MAP.get(result.get("status", ""), "error")
     except Exception as e:
         error = str(e)
-        log.error("workflow_failed", workflow_id=workflow_id, agent_id=wf.agent_id, error=error)
+        log.error("workflow_failed", workflow_id=workflow_id, agent_id=agent_id, error=error)
     finally:
         with Session(get_engine()) as session:
             wf = session.get(Workflow, workflow_id)
@@ -84,7 +93,7 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
             total_tokens=result.get("total_tokens", 0) if result else 0,
             outcome=outcome,
             tool_calls=result.get("tool_calls") if result else None,
-            agent_id=wf.agent_id,
+            agent_id=agent_id,
             triggered_by=triggered_by,
             result_summary=summary,
             ip_address=ip_address,
@@ -98,6 +107,7 @@ async def trigger_agent(
     agent_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
+    body: TriggerRequest | None = None,
     user: User = Depends(require_role("analyst")),
 ):
     try:
@@ -106,7 +116,12 @@ async def trigger_agent(
         raise HTTPException(status_code=404, detail=f"Agent not found: '{agent_id}'")
 
     with Session(get_engine()) as session:
-        wf = Workflow(name=config.name, agent_id=agent_id, created_by=user.id)
+        wf = Workflow(
+            name=config.name,
+            agent_id=agent_id,
+            created_by=user.id,
+            extra_context_json=json.dumps(body.extra_context) if body and body.extra_context else None,
+        )
         session.add(wf)
         session.commit()
         session.refresh(wf)

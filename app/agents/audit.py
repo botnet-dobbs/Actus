@@ -8,6 +8,8 @@ log = structlog.get_logger()
 
 
 class AgentRunLog(SQLModel, table=True):
+    __tablename__ = "agent_run_logs"
+
     id: int | None = Field(default=None, primary_key=True)
     agent_id: str | None = Field(default=None, index=True)
     run_id: str = Field(index=True)

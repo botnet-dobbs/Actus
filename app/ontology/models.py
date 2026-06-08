@@ -46,6 +46,8 @@ class OntologyObjectBase(SQLModel):
 
 @register("Customer")
 class Customer(OntologyObjectBase, table=True):
+    __tablename__ = "customers"
+
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     email: str = Field(unique=True)

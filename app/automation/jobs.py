@@ -1,8 +1,9 @@
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlmodel import Session, select, col
+from sqlmodel import Session, select, col, text
 from app.database import get_engine
 from app.context.store import ContextSnapshot
 from app.agents.builder import get_agent
@@ -12,6 +13,8 @@ import structlog
 log = structlog.get_logger()
 
 PURGE_AFTER_DAYS = 30
+_UPLOAD_DIR = Path("/tmp/actus-uploads")
+_DOC_CHUNK_TTL_HOURS = 2
 
 
 async def purge_old_context_snapshots() -> int:
@@ -33,6 +36,51 @@ async def purge_old_context_snapshots() -> int:
             raise
         log.info("context_purge_complete", deleted=len(old))
         return len(old)
+
+
+async def purge_orphan_doc_chunks() -> int:
+    """Delete VectorIndex rows with object_type LIKE 'doc:%' older than TTL."""
+    from app.rag.indexer import _is_postgres, delete_by_type
+    from app.rag.models import VectorIndex
+
+    if not _is_postgres():
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_DOC_CHUNK_TTL_HOURS)
+    total_deleted = 0
+    try:
+        with Session(get_engine()) as session:
+            stale_types = session.exec(
+                select(VectorIndex.object_type)
+                .where(VectorIndex.object_type.like("doc:%"))
+                .where(VectorIndex.created_at < cutoff)
+                .distinct()
+            ).all()
+
+        for type_name in stale_types:
+            try:
+                deleted = delete_by_type(type_name)
+                total_deleted += deleted
+            except Exception as e:
+                log.error("doc_chunk_purge_failed", type_name=type_name, error=str(e))
+    except Exception as e:
+        log.error("doc_chunk_purge_query_failed", error=str(e))
+
+    _purge_temp_uploads(cutoff)
+    log.info("orphan_doc_chunks_purged", deleted=total_deleted)
+    return total_deleted
+
+
+def _purge_temp_uploads(cutoff: datetime) -> None:
+    if not _UPLOAD_DIR.exists():
+        return
+    cutoff_ts = cutoff.timestamp()
+    for f in _UPLOAD_DIR.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff_ts:
+                f.unlink()
+        except Exception as e:
+            log.warning("temp_upload_unlink_failed", path=str(f), error=str(e))
 
 
 async def run_customer_analysis() -> None:
@@ -60,6 +108,14 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
         purge_old_context_snapshots,
         CronTrigger(hour=2, minute=0),
         id="purge_context_snapshots",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        purge_orphan_doc_chunks,
+        IntervalTrigger(hours=1),
+        id="purge_orphan_doc_chunks",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,

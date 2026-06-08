@@ -7,9 +7,13 @@ log = structlog.get_logger()
 _analyzer = AnalyzerEngine()
 _anonymizer = AnonymizerEngine()
 
+# DATE_TIME causes false positives on UUID hex segments and file paths.
+_EXCLUDE_ENTITIES = {"DATE_TIME"}
+
 
 def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
     results = _analyzer.analyze(text=text, language=language)
+    results = [r for r in results if r.entity_type not in _EXCLUDE_ENTITIES]
     if not results:
         return text, False
     log.warning(

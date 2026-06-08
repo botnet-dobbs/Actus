@@ -54,7 +54,7 @@ def index_object(type_name: str, object_id: int, obj) -> None:
             created_at=datetime.now(timezone.utc),
         )
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_vectorindex_type_id",
+            constraint="uq_vector_indexes_type_id",
             set_={
                 "document": stmt.excluded.document,
                 "embedding": stmt.excluded.embedding,
@@ -67,6 +67,48 @@ def index_object(type_name: str, object_id: int, obj) -> None:
         log.info("rag_indexed", type=type_name, id=object_id)
     except Exception as e:
         log.error("rag_index_failed", type=type_name, id=object_id, error=str(e))
+
+
+def index_text(type_name: str, object_id: int, text: str) -> None:
+    """Index a raw text string into VectorIndex. No-op on SQLite. Re-raises on failure."""
+    if not _is_postgres():
+        return
+    embedding = embed(text)
+    stmt = pg_insert(VectorIndex).values(
+        object_type=type_name,
+        object_id=object_id,
+        document=text,
+        embedding=embedding,
+        created_at=datetime.now(timezone.utc),
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_vector_indexes_type_id",
+        set_={
+            "document": stmt.excluded.document,
+            "embedding": stmt.excluded.embedding,
+            "created_at": stmt.excluded.created_at,
+        },
+    )
+    with Session(get_engine()) as session:
+        session.execute(stmt)
+        session.commit()
+    log.info("rag_text_indexed", type=type_name, id=object_id)
+
+
+def delete_by_type(type_name: str) -> int:
+    """Delete all VectorIndex rows for a type_name. Returns count deleted. No-op on SQLite."""
+    if not _is_postgres():
+        return 0
+    with Session(get_engine()) as session:
+        rows = session.exec(
+            select(VectorIndex).where(VectorIndex.object_type == type_name)
+        ).all()
+        count = len(rows)
+        for row in rows:
+            session.delete(row)
+        session.commit()
+    log.info("rag_type_deleted", type=type_name, count=count)
+    return count
 
 
 def delete_from_index(type_name: str, object_id: int) -> None:

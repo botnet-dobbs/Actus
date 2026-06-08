@@ -12,15 +12,15 @@ from app.llm.pii import scrub_pii
 from app.llm.router import call_llm_with_retry
 from app.observability.metrics import active_agent_runs, agent_runs_total
 
-# invoke_* tools can run up to 300s; override the 30s per-tool default
-_LONG_RUNNING_TOOLS = {"invoke_agent", "invoke_agents_parallel"}
+# these tools can run up to AGENT_TOTAL_TIMEOUT; override the 30s per-tool default
+_LONG_RUNNING_TOOLS = {"invoke_agent", "invoke_agents_parallel", "chunk_and_index_document"}
 
 log = structlog.get_logger()
 
 _settings = get_settings()
 
-AGENT_TOTAL_TIMEOUT = 300  # 5 minutes max for an entire agent run
-LLM_PER_CALL_TIMEOUT = 60  # 60 seconds per LLM call
+AGENT_TOTAL_TIMEOUT = 600  # 10 minutes max for an entire agent run
+LLM_PER_CALL_TIMEOUT = 120  # 120 seconds per LLM call
 
 TOOL_CALL_PROMPT = """Available tools (respond ONLY with JSON):
 {tools}
@@ -156,14 +156,26 @@ async def _run_agent_inner(
         bound_log.info("agent_iteration", iteration=iteration)
 
         try:
-            response = await call_llm_with_retry(
-                model=config.model,
-                messages=messages,
-                temperature=config.temperature,
-                max_tokens=config.max_response_tokens,
+            response = await asyncio.wait_for(
+                call_llm_with_retry(
+                    model=config.model,
+                    messages=messages,
+                    temperature=config.temperature,
+                    max_tokens=config.max_response_tokens,
+                    timeout=LLM_PER_CALL_TIMEOUT,
+                    api_base=api_base,
+                ),
                 timeout=LLM_PER_CALL_TIMEOUT,
-                api_base=api_base,
             )
+        except asyncio.TimeoutError:
+            err = f"LLM call timed out after {LLM_PER_CALL_TIMEOUT}s"
+            bound_log.error("llm_call_timeout", iteration=iteration, timeout=LLM_PER_CALL_TIMEOUT)
+            _try_save_context()
+            return {"run_id": run_id, "result": None, "confidence": None,
+                    "iterations": iterations_used, "status": "error", "error": err,
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens, "tool_calls": tool_calls_log,
+                    "pii_detected": pii_detected}
         except Exception as e:
             bound_log.error("llm_call_failed", iteration=iteration, error=str(e))
             _try_save_context()
