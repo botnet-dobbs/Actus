@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -22,9 +23,9 @@ _METADATA_FIELDS = {
 }
 
 
-def _object_to_text(type_name: str, obj) -> str:
+def _object_to_text(type_name: str, obj: Any) -> str:
     if hasattr(obj, "rag_document") and callable(obj.rag_document):
-        return obj.rag_document()
+        return str(obj.rag_document())
 
     parts = [type_name]
     for field, value in obj.model_dump().items():

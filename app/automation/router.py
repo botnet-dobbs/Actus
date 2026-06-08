@@ -69,6 +69,7 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
     started_at = datetime.now(timezone.utc)
     with Session(get_engine()) as session:
         wf = session.get(Workflow, workflow_id)
+        assert wf is not None
         wf.status = WorkflowStatus.running
         wf.started_at = started_at
         session.add(wf)
@@ -95,6 +96,7 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
         _run_queues.pop(workflow_id, None)
         with Session(get_engine()) as session:
             wf = session.get(Workflow, workflow_id)
+            assert wf is not None
             wf.status = status
             wf.completed_at = datetime.now(timezone.utc)
             wf.result_json = json.dumps(result) if result else None
@@ -149,6 +151,7 @@ async def trigger_agent(
         session.commit()
         session.refresh(wf)
         workflow_id = wf.id
+        assert workflow_id is not None
 
     ip = request.client.host if request.client else None
     background_tasks.add_task(_run_workflow, workflow_id, user.id, ip)
@@ -212,6 +215,7 @@ async def webhook_trigger(
         session.commit()
         session.refresh(wf)
         workflow_id = wf.id
+        assert workflow_id is not None
 
     ip = request.client.host if request.client else None
     background_tasks.add_task(_run_workflow, workflow_id, None, ip)
@@ -243,7 +247,7 @@ async def list_workflows(
         query = query.where(Workflow.agent_id == agent_id)
     if status:
         query = query.where(Workflow.status == status)
-    query = query.order_by(Workflow.created_at.desc()).offset(offset).limit(limit)
+    query = query.order_by(Workflow.created_at.desc()).offset(offset).limit(limit)  # pyright: ignore[reportAttributeAccessIssue]
     return session.exec(query).all()
 
 
@@ -285,6 +289,7 @@ async def stream_workflow(
             yield 'data: {"type": "error", "error": "Not found"}\n\n'
             return
 
+        assert wf_status is not None
         yield f'data: {{"type": "status", "status": "{wf_status.value}", "workflow_id": {workflow_id}}}\n\n'
 
         if wf_status in _TERMINAL:
@@ -368,7 +373,7 @@ async def list_runs(
         query = query.where(AgentRunLog.started_at >= from_date)
     if to_date:
         query = query.where(AgentRunLog.started_at <= to_date)
-    query = query.order_by(AgentRunLog.started_at.desc()).offset(offset).limit(limit)
+    query = query.order_by(AgentRunLog.started_at.desc()).offset(offset).limit(limit)  # pyright: ignore[reportAttributeAccessIssue]
     return session.exec(query).all()
 
 

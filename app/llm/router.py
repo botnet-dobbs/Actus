@@ -94,16 +94,16 @@ async def complete(request: Request, req: CompletionRequest):
         "llm_call_complete",
         model=model,
         latency_ms=round(latency_ms, 1),
-        prompt_tokens=response.usage.prompt_tokens,
-        completion_tokens=response.usage.completion_tokens,
-        total_tokens=response.usage.total_tokens,
+        prompt_tokens=response.usage.prompt_tokens,  # pyright: ignore[reportAttributeAccessIssue]
+        completion_tokens=response.usage.completion_tokens,  # pyright: ignore[reportAttributeAccessIssue]
+        total_tokens=response.usage.total_tokens,  # pyright: ignore[reportAttributeAccessIssue]
         cost_usd=round(cost, 6),
         pii_detected=pii_found,
     )
     return CompletionResponse(
-        content=response.choices[0].message.content,
-        model=response.model,
-        usage=dict(response.usage),
+        content=response.choices[0].message.content,  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
+        model=response.model,  # pyright: ignore[reportArgumentType]
+        usage=dict(response.usage),  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
         pii_detected=pii_found,
         request_id=getattr(request.state, "request_id", None),
     )
@@ -128,8 +128,8 @@ async def chat_stream(request: Request, req: CompletionRequest):
                 stream=True,
                 api_base=_settings.ollama_base_url if "ollama" in model else None,
             )
-            async for chunk in response:
-                delta = chunk.choices[0].delta.content
+            async for chunk in response:  # pyright: ignore[reportGeneralTypeIssues]
+                delta = chunk.choices[0].delta.content  # pyright: ignore[reportAttributeAccessIssue]
                 if delta:
                     yield delta
         except asyncio.TimeoutError:

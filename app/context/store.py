@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from typing import ClassVar
 from sqlmodel import SQLModel, Field, Session, select
 from app.database import get_engine
 from app.context.models import AgentContext
@@ -10,7 +11,7 @@ MAX_CONTEXT_BYTES = 512_000  # 500 KB
 
 
 class ContextSnapshot(SQLModel, table=True):
-    __tablename__ = "context_snapshots"
+    __tablename__: ClassVar[str] = "context_snapshots"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     agent_id: str = Field(index=True)

@@ -198,10 +198,10 @@ async def _run_agent_inner(
                     "total_tokens": total_tokens, "tool_calls": tool_calls_log,
                     "pii_detected": pii_detected}
 
-        if response.usage:
-            total_tokens += response.usage.total_tokens
-            prompt_tokens += getattr(response.usage, "prompt_tokens", 0) or 0
-            completion_tokens += getattr(response.usage, "completion_tokens", 0) or 0
+        if response.usage:  # pyright: ignore[reportAttributeAccessIssue]
+            total_tokens += response.usage.total_tokens  # pyright: ignore[reportAttributeAccessIssue]
+            prompt_tokens += getattr(response.usage, "prompt_tokens", 0) or 0  # pyright: ignore[reportAttributeAccessIssue]
+            completion_tokens += getattr(response.usage, "completion_tokens", 0) or 0  # pyright: ignore[reportAttributeAccessIssue]
             if total_tokens > config.token_budget:
                 bound_log.warning("agent_token_budget_exceeded",
                                   total_tokens=total_tokens, budget=config.token_budget)
@@ -215,7 +215,7 @@ async def _run_agent_inner(
                         "total_tokens": total_tokens, "tool_calls": tool_calls_log,
                         "pii_detected": pii_detected}
 
-        raw_content = response.choices[0].message.content
+        raw_content = response.choices[0].message.content  # pyright: ignore[reportAttributeAccessIssue]
         content = (raw_content or "").strip()
         messages.append({"role": "assistant", "content": content})
 

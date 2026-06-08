@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from typing import ClassVar
 from pydantic import BaseModel, ConfigDict, computed_field, field_validator
 from sqlmodel import SQLModel, Field, Session
 from app.database import get_engine
@@ -9,7 +10,7 @@ log = structlog.get_logger()
 
 
 class AgentRunLog(SQLModel, table=True):
-    __tablename__ = "agent_run_logs"
+    __tablename__: ClassVar[str] = "agent_run_logs"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     agent_id: str | None = Field(default=None, index=True)

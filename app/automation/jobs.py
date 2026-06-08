@@ -52,7 +52,7 @@ async def purge_orphan_doc_chunks() -> int:
         with Session(get_engine()) as session:
             stale_types = session.exec(
                 select(VectorIndex.object_type)
-                .where(VectorIndex.object_type.like("doc:%"))
+                .where(VectorIndex.object_type.like("doc:%"))  # pyright: ignore[reportAttributeAccessIssue]
                 .where(VectorIndex.created_at < cutoff)
                 .distinct()
             ).all()

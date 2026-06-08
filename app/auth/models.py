@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
+from typing import ClassVar
 from sqlalchemy import DateTime as SADateTime, Column
 from sqlmodel import SQLModel, Field
 import bcrypt as _bcrypt
 
 
 class User(SQLModel, table=True):
-    __tablename__ = "users"
+    __tablename__: ClassVar[str] = "users"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
@@ -46,7 +47,7 @@ class User(SQLModel, table=True):
 
 
 class AuditLog(SQLModel, table=True):
-    __tablename__ = "audit_logs"
+    __tablename__: ClassVar[str] = "audit_logs"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(index=True)

@@ -1,3 +1,4 @@
+from typing import Any
 from sqlmodel import SQLModel, Session, create_engine
 
 from app.config import get_settings
@@ -11,7 +12,7 @@ def get_engine():
     if _engine is None:
         settings = get_settings()
 
-        kwargs = {"echo": settings.debug}
+        kwargs: dict[str, Any] = {"echo": settings.debug}
 
         if "sqlite" in settings.database_url:
             kwargs["connect_args"] = {"check_same_thread": False}

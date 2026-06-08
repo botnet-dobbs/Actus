@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import ClassVar
 from sqlmodel import SQLModel, Field
 from app.ontology.registry import register
 
@@ -46,7 +47,7 @@ class OntologyObjectBase(SQLModel):
 
 @register("Customer")
 class Customer(OntologyObjectBase, table=True):
-    __tablename__ = "customers"
+    __tablename__: ClassVar[str] = "customers"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True)

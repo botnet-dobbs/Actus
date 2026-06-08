@@ -1,7 +1,9 @@
+from typing import cast
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlmodel import Session, select
 from app.database import get_session
+from app.ontology.models import OntologyObjectBase
 from app.ontology.registry import get_type, list_types
 from app.auth.models import User
 from app.auth.jwt import get_current_user, write_audit_log
@@ -25,7 +27,7 @@ def list_objects(
     offset: int = 0,
 ):
     try:
-        cls = get_type(type_name)
+        cls = cast(type[OntologyObjectBase], get_type(type_name))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     results = session.exec(
@@ -41,7 +43,7 @@ def get_object(
     session: Session = Depends(get_session),
 ):
     try:
-        cls = get_type(type_name)
+        cls = cast(type[OntologyObjectBase], get_type(type_name))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     obj = session.get(cls, object_id)
@@ -60,7 +62,7 @@ def create_object(
     user: User = Depends(get_current_user),
 ):
     try:
-        cls = get_type(type_name)
+        cls = cast(type[OntologyObjectBase], get_type(type_name))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     unknown = set(payload.keys()) - set(cls.model_fields.keys())
@@ -82,10 +84,10 @@ def create_object(
         session.rollback()
         log.error("ontology_create_failed", type=type_name, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
-    background_tasks.add_task(index_object, type_name, obj.id, obj)
+    background_tasks.add_task(index_object, type_name, obj.id, obj)  # pyright: ignore[reportAttributeAccessIssue]
     ip = request.client.host if request.client else None
-    write_audit_log(username=user.username, action="ontology_create", resource=f"{type_name}:{obj.id}", ip=ip)
-    log.info("ontology_object_created", type=type_name, id=obj.id, by=user.username)
+    write_audit_log(username=user.username, action="ontology_create", resource=f"{type_name}:{obj.id}", ip=ip)  # pyright: ignore[reportAttributeAccessIssue]
+    log.info("ontology_object_created", type=type_name, id=obj.id, by=user.username)  # pyright: ignore[reportAttributeAccessIssue]
     return obj
 
 
@@ -100,7 +102,7 @@ def update_object(
     user: User = Depends(get_current_user),
 ):
     try:
-        cls = get_type(type_name)
+        cls = cast(type[OntologyObjectBase], get_type(type_name))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     unknown = [k for k in payload if k not in cls.model_fields]
@@ -120,7 +122,7 @@ def update_object(
         session.rollback()
         log.error("ontology_update_failed", type=type_name, id=object_id, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
-    background_tasks.add_task(index_object, type_name, obj.id, obj)
+    background_tasks.add_task(index_object, type_name, obj.id, obj)  # pyright: ignore[reportAttributeAccessIssue]
     ip = request.client.host if request.client else None
     write_audit_log(username=user.username, action="ontology_update", resource=f"{type_name}:{object_id}", ip=ip)
     log.info("ontology_object_updated", type=type_name, id=object_id, by=user.username)
@@ -137,7 +139,7 @@ def delete_object(
     user: User = Depends(get_current_user),
 ):
     try:
-        cls = get_type(type_name)
+        cls = cast(type[OntologyObjectBase], get_type(type_name))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     obj = session.get(cls, object_id)

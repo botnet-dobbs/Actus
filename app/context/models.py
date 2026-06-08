@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 from enum import Enum
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field
@@ -45,7 +45,7 @@ class WorkflowStatus(str, Enum):
 
 
 class Workflow(SQLModel, table=True):
-    __tablename__ = "workflows"
+    __tablename__: ClassVar[str] = "workflows"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     id: int | None = Field(default=None, primary_key=True)
     name: str

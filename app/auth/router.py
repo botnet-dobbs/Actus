@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict
@@ -89,7 +89,7 @@ async def login(
         select(User).where(User.username == form.username, User.is_deleted == False)
     ).first()
 
-    def fail(detail: str) -> None:
+    def fail(detail: str) -> NoReturn:
         if user:
             user.failed_login_count += 1
             if user.failed_login_count >= MAX_FAILED_ATTEMPTS:

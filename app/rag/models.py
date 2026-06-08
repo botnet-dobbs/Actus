@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, UniqueConstraint
@@ -11,7 +11,7 @@ VECTOR_DIM = 384  # all-MiniLM-L6-v2 output dimensions
 
 
 class VectorIndex(SQLModel, table=True):
-    __tablename__ = "vector_indexes"
+    __tablename__: ClassVar[str] = "vector_indexes"  # pyright: ignore[reportIncompatibleVariableOverride]
     __table_args__ = (
         UniqueConstraint("object_type", "object_id", name="uq_vector_indexes_type_id"),
     )
