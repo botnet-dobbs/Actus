@@ -66,7 +66,8 @@ def extract_json(content: str) -> str:
     return content
 
 
-async def run_agent(config: AgentConfig, extra_context: dict | None = None) -> dict:
+async def run_agent(config: AgentConfig, extra_context: dict | None = None,
+                    event_queue: asyncio.Queue | None = None) -> dict:
     run_id = str(uuid.uuid4())
     bound_log = log.bind(agent_id=config.id, run_id=run_id)
     bound_log.info("agent_run_start")
@@ -74,7 +75,7 @@ async def run_agent(config: AgentConfig, extra_context: dict | None = None) -> d
     _stack_token = _invoke_stack.set(_invoke_stack.get() + [config.id])
     status = "unknown"
     try:
-        result = await _run_agent_inner(config, run_id, bound_log, extra_context)
+        result = await _run_agent_inner(config, run_id, bound_log, extra_context, event_queue)
         status = result.get("status", "unknown")
         return result
     except Exception:
@@ -84,6 +85,8 @@ async def run_agent(config: AgentConfig, extra_context: dict | None = None) -> d
         _invoke_stack.reset(_stack_token)
         active_agent_runs.dec()
         agent_runs_total.labels(agent_id=config.id, status=status).inc()
+        if event_queue is not None:
+            await event_queue.put(None)  # end-of-stream sentinel, guaranteed on any exit
 
 
 async def _run_agent_inner(
@@ -91,7 +94,12 @@ async def _run_agent_inner(
     run_id: str,
     bound_log,
     extra_context: dict | None,
+    event_queue: asyncio.Queue | None = None,
 ) -> dict:
+    async def _emit(event: dict) -> None:
+        if event_queue is not None:
+            await event_queue.put(event)
+
     tools_desc = json.dumps(list(_tool_schemas.values()), indent=2)
     messages = [{"role": "system",
                  "content": config.system_prompt.rstrip() + "\n\n" + TOOL_CALL_PROMPT.format(tools=tools_desc)}]
@@ -154,6 +162,7 @@ async def _run_agent_inner(
     for iteration in range(config.max_iterations):
         iterations_used = iteration + 1
         bound_log.info("agent_iteration", iteration=iteration)
+        await _emit({"type": "iteration_start", "run_id": run_id, "iteration": iteration})
 
         try:
             response = await asyncio.wait_for(
@@ -171,6 +180,8 @@ async def _run_agent_inner(
             err = f"LLM call timed out after {LLM_PER_CALL_TIMEOUT}s"
             bound_log.error("llm_call_timeout", iteration=iteration, timeout=LLM_PER_CALL_TIMEOUT)
             _try_save_context()
+            await _emit({"type": "done", "run_id": run_id, "status": "error",
+                         "error": err, "iterations": iterations_used, "total_tokens": total_tokens})
             return {"run_id": run_id, "result": None, "confidence": None,
                     "iterations": iterations_used, "status": "error", "error": err,
                     "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -179,6 +190,8 @@ async def _run_agent_inner(
         except Exception as e:
             bound_log.error("llm_call_failed", iteration=iteration, error=str(e))
             _try_save_context()
+            await _emit({"type": "done", "run_id": run_id, "status": "error",
+                         "error": str(e), "iterations": iterations_used, "total_tokens": total_tokens})
             return {"run_id": run_id, "result": None, "confidence": None,
                     "iterations": iterations_used, "status": "error", "error": str(e),
                     "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -193,6 +206,9 @@ async def _run_agent_inner(
                 bound_log.warning("agent_token_budget_exceeded",
                                   total_tokens=total_tokens, budget=config.token_budget)
                 _try_save_context()
+                await _emit({"type": "done", "run_id": run_id, "status": "incomplete",
+                             "result": "Token budget exceeded", "iterations": iterations_used,
+                             "total_tokens": total_tokens})
                 return {"run_id": run_id, "result": "Token budget exceeded",
                         "confidence": None, "iterations": iterations_used, "status": "incomplete",
                         "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -213,6 +229,8 @@ async def _run_agent_inner(
                                              "Respond ONLY with a tool call or the done signal."})
                 continue
             _try_save_context()
+            await _emit({"type": "done", "run_id": run_id, "status": "incomplete",
+                         "result": content, "iterations": iterations_used, "total_tokens": total_tokens})
             return {"run_id": run_id, "result": content, "confidence": None,
                     "iterations": iterations_used, "status": "incomplete",
                     "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -229,6 +247,9 @@ async def _run_agent_inner(
         if action.get("done"):
             bound_log.info("agent_run_complete", iterations=iterations_used, total_tokens=total_tokens)
             _try_save_context()
+            await _emit({"type": "done", "run_id": run_id, "status": "completed",
+                         "result": action.get("result"), "confidence": action.get("confidence"),
+                         "iterations": iterations_used, "total_tokens": total_tokens})
             return {"run_id": run_id, "result": action.get("result"),
                     "confidence": action.get("confidence"),
                     "iterations": iterations_used, "status": "completed",
@@ -253,20 +274,29 @@ async def _run_agent_inner(
             if not isinstance(raw_args, dict) and raw_args is not None:
                 bound_log.warning("llm_invalid_args_type",
                                   tool=tool_name, args_type=type(raw_args).__name__)
-            result = await run_tool(tool_name, timeout_seconds=tool_timeout, **args)
+            await _emit({"type": "tool_call", "run_id": run_id, "iteration": iteration,
+                         "tool": tool_name, "args": args})
+            tool_result = await run_tool(tool_name, timeout_seconds=tool_timeout, **args)
+            await _emit({"type": "tool_result", "run_id": run_id, "iteration": iteration,
+                         "tool": tool_name, "success": tool_result.success,
+                         "preview": json.dumps(tool_result.output, default=str)[:300]})
             tool_calls_log.append({
                 "tool": tool_name,
-                "success": result.success,
-                "detail": result.error if not result.success else "",
+                "success": tool_result.success,
+                "detail": tool_result.error if not tool_result.success else "",
             })
-            if result.success:
-                tool_output = json.dumps(result.output, default=str) if result.output is not None else "null"
+            if tool_result.success:
+                tool_output = (json.dumps(tool_result.output, default=str)
+                               if tool_result.output is not None else "null")
             else:
-                tool_output = json.dumps({"error": result.error})
+                tool_output = json.dumps({"error": tool_result.error})
             messages.append({"role": "user", "content": f"Tool result: {tool_output}"})
 
     bound_log.warning("agent_max_iterations_reached", iterations=iterations_used, total_tokens=total_tokens)
     _try_save_context()
+    await _emit({"type": "done", "run_id": run_id, "status": "incomplete",
+                 "result": "Max iterations reached", "iterations": iterations_used,
+                 "total_tokens": total_tokens})
     return {"run_id": run_id, "result": "Max iterations reached",
             "confidence": None, "iterations": iterations_used, "status": "incomplete",
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
@@ -274,10 +304,11 @@ async def _run_agent_inner(
             "pii_detected": pii_detected}
 
 
-async def run_agent_with_timeout(config: AgentConfig, extra_context: dict | None = None) -> dict:
+async def run_agent_with_timeout(config: AgentConfig, extra_context: dict | None = None,
+                                  event_queue: asyncio.Queue | None = None) -> dict:
     try:
         return await asyncio.wait_for(
-            run_agent(config, extra_context=extra_context),
+            run_agent(config, extra_context=extra_context, event_queue=event_queue),
             timeout=AGENT_TOTAL_TIMEOUT,
         )
     except asyncio.TimeoutError:

@@ -1,8 +1,10 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 from app.agents.audit import log_agent_run
 from app.agents.builder import get_agent, list_agents, reload_agents
@@ -29,6 +31,8 @@ class TriggerRequest(BaseModel):
 
 
 class WorkflowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     agent_id: str
@@ -43,7 +47,14 @@ class WorkflowResponse(BaseModel):
     extra_context_json: str | None
 
 
+# keyed by workflow_id; holds the live event queue for an in-progress run on this process
+_run_queues: dict[int, asyncio.Queue] = {}
+
+
 async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: str | None) -> None:
+    queue: asyncio.Queue = asyncio.Queue()
+    _run_queues[workflow_id] = queue
+
     started_at = datetime.now(timezone.utc)
     with Session(get_engine()) as session:
         wf = session.get(Workflow, workflow_id)
@@ -63,13 +74,14 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
     try:
         config = get_agent(agent_id)
         extra_context = json.loads(extra_context_json) if extra_context_json else None
-        result = await run_agent_with_timeout(config, extra_context=extra_context)
+        result = await run_agent_with_timeout(config, extra_context=extra_context, event_queue=queue)
         status = WorkflowStatus.completed
         outcome = _OUTCOME_MAP.get(result.get("status", ""), "error")
     except Exception as e:
         error = str(e)
         log.error("workflow_failed", workflow_id=workflow_id, agent_id=agent_id, error=error)
     finally:
+        _run_queues.pop(workflow_id, None)
         with Session(get_engine()) as session:
             wf = session.get(Workflow, workflow_id)
             wf.status = status
@@ -171,6 +183,90 @@ async def get_workflow(
     if not wf:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
     return wf
+
+
+@router.get("/workflows/{workflow_id}/stream")
+async def stream_workflow(
+    workflow_id: int,
+    request: Request,
+    _: User = Depends(require_role("analyst")),
+):
+    _TERMINAL = {WorkflowStatus.completed, WorkflowStatus.failed, WorkflowStatus.timeout}
+
+    async def sse_generator():
+        # Emit current status immediately from DB — fast first event, captures values inside session
+        with Session(get_engine()) as session:
+            db_wf = session.get(Workflow, workflow_id)
+            if db_wf is None:
+                found = False
+                wf_status = None
+                terminal_payload = None
+            else:
+                found = True
+                wf_status = db_wf.status
+                terminal_payload = (WorkflowResponse.model_validate(db_wf).model_dump_json()
+                                    if wf_status in _TERMINAL else None)
+
+        if not found:
+            yield 'data: {"type": "error", "error": "Not found"}\n\n'
+            return
+
+        yield f'data: {{"type": "status", "status": "{wf_status.value}", "workflow_id": {workflow_id}}}\n\n'
+
+        if wf_status in _TERMINAL:
+            yield f"data: {terminal_payload}\n\n"
+            return
+
+        # Try live queue (per-iteration events) — falls back to DB polling if absent
+        queue = _run_queues.get(workflow_id)
+        if queue is not None:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if event is None:  # sentinel — run_agent finally block guarantees this fires
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") == "done":
+                    break
+            # Emit final durable result from DB
+            with Session(get_engine()) as session:
+                db_wf = session.get(Workflow, workflow_id)
+                final_payload = (WorkflowResponse.model_validate(db_wf).model_dump_json()
+                                 if db_wf is not None else None)
+            if final_payload:
+                yield f"data: {final_payload}\n\n"
+        else:
+            # Fallback: DB polling for reconnect / LB failover / already-done without queue
+            last_status = wf_status
+            while True:
+                if await request.is_disconnected():
+                    break
+                await asyncio.sleep(1)
+                with Session(get_engine()) as session:
+                    db_wf = session.get(Workflow, workflow_id)
+                    if db_wf is None:
+                        break
+                    curr_status = db_wf.status
+                    curr_payload = (WorkflowResponse.model_validate(db_wf).model_dump_json()
+                                    if curr_status in _TERMINAL else None)
+                if curr_status != last_status:
+                    last_status = curr_status
+                    if curr_status in _TERMINAL:
+                        yield f"data: {curr_payload}\n\n"
+                        break
+                    yield (f'data: {{"type": "status", "status": "{curr_status.value}",'
+                           f' "workflow_id": {workflow_id}}}\n\n')
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Reload agents ─────────────────────────────────────────────────────────────

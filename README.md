@@ -102,11 +102,16 @@ WF_ID=$(curl -s -X POST http://localhost:8000/automation/trigger/doc_qa \
   | jq -r .workflow_id)
 ```
 
-**Step 3 — Poll for the result**
+**Step 3 — Stream the result (or poll)**
 
 ```bash
-curl http://localhost:8000/automation/workflows/$WF_ID \
-  -H "Authorization: Bearer $TOKEN" | jq .result_json
+# Stream live events — closes automatically when the agent finishes
+curl -N "http://localhost:8000/automation/workflows/$WF_ID/stream" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Or watch the poll endpoint (refreshes every 2 s)
+watch -n 2 curl -s "http://localhost:8000/automation/workflows/$WF_ID" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 **Supported formats:** `.pdf`, `.docx` — up to 20 MB per file.

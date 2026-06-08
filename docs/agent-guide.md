@@ -10,34 +10,31 @@ Everything you need to build, register, invoke, and test agents on this platform
 POST /automation/trigger/{agent_id}
         │  extra_context (file_path, question, …)
         ▼
-  Workflow row created → background task
+  Workflow row created → returns {workflow_id}
         │
-        ▼
-  run_agent_with_timeout()          ← 600 s outer wall clock
-        │
-        ▼
-  _run_agent_inner()
-        │
-        ├─ pre-loop RAG retrieval (if rag_query_template set)
-        ├─ extra_context injected as user message
-        │
-        └─ ReAct loop  (up to max_iterations)
-                │
-                ├─ call_llm_with_retry()   ← 120 s per call, asyncio.wait_for
-                │        model from YAML, PII-scrubbed messages
-                │
-                ├─ parse JSON from LLM response
-                │        {"tool": "name", "args": {…}}
-                │        {"done": true, "result": "…", "confidence": 0.9}
-                │
-                ├─ run_tool()              ← 30 s default, 600 s for long-running tools
-                │        tool result appended as user message
-                │
+        ├──────────────────────────────────────────────┐
+        │  background task                              │  SSE client
+        ▼                                              ▼
+  run_agent_with_timeout()          ← 600 s   GET /automation/workflows/{id}/stream
+        │                                              │
+        ▼                                              ├─ immediate status event (from DB)
+  _run_agent_inner(event_queue)                        │
+        │                                              │  live queue path (same process):
+        ├─ pre-loop RAG retrieval                      ├─ iteration_start events
+        ├─ extra_context injected as user message      ├─ tool_call / tool_result events
+        │                                              ├─ done event
+        └─ ReAct loop  (up to max_iterations)          │
+                │                                      │  DB-poll fallback (reconnect/LB):
+                ├─ call_llm_with_retry()   ← 120 s     ├─ polls every 1 s until terminal
+                │        asyncio.wait_for              │
+                ├─ emit iteration_start/tool events ───┘
+                ├─ run_tool()              ← 30 s / 600 s for long-running tools
                 └─ repeat until done / budget / max_iterations / timeout
         │
         ▼
   Workflow.status → completed / failed / timeout
   AgentRunLog row written
+  SSE sentinel emitted → final WorkflowResponse delivered to stream
 ```
 
 ---
@@ -264,14 +261,34 @@ curl -X POST http://localhost:8000/automation/trigger/my_agent \
 
 Response: `{"status": "queued", "agent_id": "my_agent", "workflow_id": 42}`
 
-### Poll for result
+### Stream the result (preferred)
 
 ```bash
-curl http://localhost:8000/automation/workflows/42 \
+curl -N "http://localhost:8000/automation/workflows/42/stream" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-`status` progresses: `pending` → `running` → `completed` / `failed` / `timeout`
+The stream opens immediately with the current status, then delivers per-iteration events as the agent works, and closes with the full `WorkflowResponse` when the run completes.
+
+```
+data: {"type": "status", "status": "running", "workflow_id": 42}
+data: {"type": "iteration_start", "run_id": "abc", "iteration": 0}
+data: {"type": "tool_call", "run_id": "abc", "iteration": 0, "tool": "my_tool", "args": {}}
+data: {"type": "tool_result", "run_id": "abc", "iteration": 0, "tool": "my_tool", "success": true, "preview": "..."}
+data: {"type": "done", "run_id": "abc", "status": "completed", "result": "...", "confidence": 0.9}
+data: {"id": 42, "status": "completed", "result_json": "...", ...}
+```
+
+The stream is reconnectable — disconnect and re-open with the same `workflow_id` at any time.
+
+### Poll for result (alternative)
+
+```bash
+watch -n 2 curl -s "http://localhost:8000/automation/workflows/42" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Refreshes every 2 seconds. `status` progresses: `pending` → `running` → `completed` / `failed` / `timeout`
 
 `result_json` is the serialised agent result dict, including `result`, `confidence`, `iterations`, `tool_calls`, and token counts.
 
@@ -418,8 +435,13 @@ WF_ID=$(curl -s -X POST http://localhost:8000/automation/trigger/my_agent \
   -H "Content-Type: application/json" \
   -d '{"extra_context": {"input": "hello world"}}' | jq -r .workflow_id)
 
-curl -s "http://localhost:8000/automation/workflows/$WF_ID" \
-  -H "Authorization: Bearer $TOKEN" | jq .
+# Stream live progress (recommended)
+curl -N "http://localhost:8000/automation/workflows/$WF_ID/stream" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Or watch the poll endpoint (alternative)
+watch -n 2 curl -s "http://localhost:8000/automation/workflows/$WF_ID" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
