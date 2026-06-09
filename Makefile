@@ -1,4 +1,4 @@
-.PHONY: test migrate backfill-rag migrations docker-build docker-up docker-up-d ollama-pull docker-down docker-logs docker-restart docker-rebuild
+.PHONY: test migrate backfill-rag migrations docker-build docker-up docker-up-d ollama-pull docker-down docker-logs docker-restart docker-rebuild dev dev-d dev-down dev-rebuild
 
 test:
 	uv run python -m pytest tests/ -v
@@ -12,30 +12,50 @@ backfill-rag:
 migrations:
 	uv run alembic revision --autogenerate -m "$(msg)"
 
-# ── Docker ────────────────────────────────────────────────────────────────────
+# ── Docker (production) ───────────────────────────────────────────────────────
+
+DC = docker compose
 
 docker-build:
-	docker compose build
+	$(DC) build
 
 docker-up:
 	mkdir -p config/agents
-	docker compose up
+	$(DC) up
 
 docker-up-d:
 	mkdir -p config/agents
-	docker compose up -d
+	$(DC) up -d
 
 ollama-pull:
-	docker compose exec ollama ollama pull mistral
+	$(DC) -f docker-compose.yml -f docker-compose.dev.yml exec ollama ollama pull mistral
 
 docker-down:
-	docker compose down
+	$(DC) down
 
 docker-logs:
-	docker compose logs -f
+	$(DC) logs -f
 
 docker-restart:
-	docker compose restart actus
+	$(DC) restart actus
 
 docker-rebuild:
-	docker compose down && docker compose up --build -d
+	$(DC) down && $(DC) up --build -d
+
+# ── Docker (development) ──────────────────────────────────────────────────────
+
+DEV = docker compose -f docker-compose.yml -f docker-compose.dev.yml
+
+dev:
+	mkdir -p config/agents
+	$(DEV) up
+
+dev-d:
+	mkdir -p config/agents
+	$(DEV) up -d
+
+dev-down:
+	$(DEV) down
+
+dev-rebuild:
+	$(DEV) down && $(DEV) up --build

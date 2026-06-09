@@ -83,3 +83,13 @@ async def subscribe_workflow(channel: str, timeout: float = 660.0) -> AsyncGener
 
 def is_available() -> bool:
     return _redis is not None
+
+
+async def ping() -> bool | None:
+    """None = not configured; True = reachable; False = error."""
+    if _redis is None:
+        return None
+    try:
+        return bool(await _redis.ping())
+    except Exception:
+        return False

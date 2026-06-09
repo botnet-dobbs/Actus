@@ -11,21 +11,15 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       REDIS_URL: redis://redis:6379
       DEBUG: ${DEBUG:-false}
-    volumes:
-      - ./app:/app/app
-      - ./migrations:/app/migrations
-      - ./config:/app/config
-      - ./scripts:/app/scripts
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
     depends_on:
-      ollama:
-        condition: service_started
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --reload"
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -37,8 +31,6 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
-    ports:
-      - "5432:5432"
     environment:
       POSTGRES_DB: actus
       POSTGRES_USER: actus
@@ -50,18 +42,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U actus"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 15s
-      timeout: 10s
-      start_period: 120s
       retries: 5
 
   redis:
@@ -93,5 +73,4 @@ services:
 
 volumes:
   postgres_data:
-  ollama_data:
   grafana_data:

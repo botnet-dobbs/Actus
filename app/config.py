@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]
     cors_allow_credentials: bool = False
     access_token_expire_minutes: int = 60
+    refresh_token_expire_minutes: int = 10_080  # 7 days
     algorithm: str = "HS256"
+    scheduler_enabled: bool = True
     # Retry settings
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0

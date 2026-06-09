@@ -63,12 +63,14 @@ async def lifespan(app: FastAPI):
         log.error("agent_load_failed_at_startup", error=str(e))
         raise
 
-    start_scheduler()
+    if _settings.scheduler_enabled:
+        start_scheduler()
 
     try:
         yield
     finally:
-        stop_scheduler()
+        if _settings.scheduler_enabled:
+            stop_scheduler()
         await pubsub.close_redis()
 
 
@@ -98,22 +100,41 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz", tags=["Health"])
     async def health(session: Session = Depends(get_session)):
-        checks = {}
+        core: dict[str, str] = {}
+        info: dict[str, str] = {}
+
+        # Core checks — failures here return 503
         try:
             session.exec(select(1))
-            checks["database"] = "ok"
+            core["database"] = "ok"
         except Exception as e:
-            checks["database"] = f"error: {e}"
+            core["database"] = f"error: {e}"
+
+        if _settings.scheduler_enabled:
+            core["scheduler"] = "ok" if scheduler.running else "stopped"
+
+        # Informational checks — reported but never cause 503
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 r = await client.get(f"{_settings.ollama_base_url}/api/tags")
-                checks["ollama"] = "ok" if r.status_code == 200 else "unreachable"
+                info["ollama"] = "ok" if r.status_code == 200 else "unreachable"
         except Exception:
-            checks["ollama"] = "unreachable"
-        checks["scheduler"] = "ok" if scheduler.running else "stopped"
-        status = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
-        code = 200 if status == "ok" else 503
-        return JSONResponse({"status": status, "checks": checks}, status_code=code)
+            info["ollama"] = "unreachable"
+
+        redis_result = await pubsub.ping()
+        if redis_result is None:
+            info["redis"] = "not_configured"
+        elif redis_result:
+            info["redis"] = "ok"
+        else:
+            info["redis"] = "error"
+
+        healthy = all(v == "ok" for v in core.values())
+        status = "ok" if healthy else "degraded"
+        return JSONResponse(
+            {"status": status, "core": core, "info": info},
+            status_code=200 if healthy else 503,
+        )
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):

@@ -2,15 +2,22 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from app.config import get_settings
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 from app.database import get_session
-from app.auth.models import Team, User, hash_password, verify_password
-from app.auth.jwt import create_access_token, get_current_user, require_role, write_audit_log
+from app.auth.models import Team, User, VALID_ROLES, hash_password, verify_password
+from app.auth.jwt import (
+    create_access_token, create_refresh_token,
+    get_current_user, require_role, write_audit_log,
+    _revoke_token, _is_revoked, oauth2_scheme,
+)
 import structlog
 
 log = structlog.get_logger()
 
+_settings = get_settings()
 router = APIRouter()
 
 MAX_FAILED_ATTEMPTS = 5
@@ -38,7 +45,14 @@ class PasswordResetRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str
 
 
 class UserResponse(BaseModel):
@@ -141,15 +155,71 @@ async def login(
     session.add(user)
     session.commit()
 
-    token = create_access_token({"sub": user.username})
     write_audit_log(username=user.username, action="login", ip=ip, success=True)
     log.info("user_logged_in", username=user.username)
-    return TokenResponse(access_token=token)
+    return TokenResponse(
+        access_token=create_access_token({"sub": user.username}),
+        refresh_token=create_refresh_token({"sub": user.username}),
+    )
 
 
 @router.get("/me", response_model=UserResponse)
 async def me(user: User = Depends(get_current_user)):
     return user
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh(req: RefreshRequest, session: Session = Depends(get_session)):
+    exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(req.refresh_token, _settings.secret_key, algorithms=[_settings.algorithm])
+        if payload.get("type") != "refresh":
+            raise exc
+        username: str | None = payload.get("sub")
+        if not username:
+            raise exc
+        old_jti: str | None = payload.get("jti")
+        old_exp: int = payload.get("exp", 0)
+    except JWTError:
+        raise exc
+
+    if old_jti and await _is_revoked(old_jti):
+        raise exc
+
+    user = session.exec(select(User).where(User.username == username, User.is_deleted == False)).first()
+    if not user or not user.is_active or user.is_locked():
+        raise exc
+
+    if old_jti:
+        old_ttl = max(0, int(old_exp - datetime.now(timezone.utc).timestamp()))
+        await _revoke_token(old_jti, old_ttl)
+
+    return TokenResponse(
+        access_token=create_access_token({"sub": user.username}),
+        refresh_token=create_refresh_token({"sub": user.username}),
+    )
+
+
+@router.post("/logout", status_code=204)
+async def logout(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    user: User = Depends(get_current_user),
+):
+    try:
+        payload = jwt.decode(token, _settings.secret_key, algorithms=[_settings.algorithm])
+        jti: str | None = payload.get("jti")
+        exp: int = payload.get("exp", 0)
+        ttl = max(0, int(exp - datetime.now(timezone.utc).timestamp()))
+        if jti and ttl > 0:
+            await _revoke_token(jti, ttl)
+    except JWTError:
+        pass
+    write_audit_log(username=user.username, action="logout", success=True)
 
 
 @router.patch("/users/{user_id}/role", response_model=UserResponse)
@@ -159,9 +229,8 @@ async def assign_role(
     session: Session = Depends(get_session),
     admin: User = Depends(require_role("admin")),
 ):
-    valid_roles = {"viewer", "analyst", "admin"}
-    if req.role not in valid_roles:
-        raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(sorted(valid_roles))}")
+    if req.role not in VALID_ROLES:
+        raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
 
     target = session.exec(
         select(User).where(User.id == user_id, User.is_deleted == False)

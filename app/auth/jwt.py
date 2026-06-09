@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import uuid as _uuid
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
@@ -18,8 +19,40 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=_settings.access_token_expire_minutes))
-    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
+    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc), "jti": str(_uuid.uuid4())})
     return jwt.encode(to_encode, _settings.secret_key, algorithm=_settings.algorithm)
+
+
+def create_refresh_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=_settings.refresh_token_expire_minutes)
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "jti": str(_uuid.uuid4()),
+        "type": "refresh",
+    })
+    return jwt.encode(to_encode, _settings.secret_key, algorithm=_settings.algorithm)
+
+
+async def _revoke_token(jti: str, expires_in: int) -> None:
+    from app import pubsub
+    if pubsub._redis is None:
+        return
+    try:
+        await pubsub._redis.setex(f"jti:revoked:{jti}", expires_in, "1")
+    except Exception as e:
+        log.warning("token_revocation_failed", jti=jti, error=str(e))
+
+
+async def _is_revoked(jti: str) -> bool:
+    from app import pubsub
+    if pubsub._redis is None:
+        return False
+    try:
+        return bool(await pubsub._redis.exists(f"jti:revoked:{jti}"))
+    except Exception:
+        return False
 
 
 async def get_current_user(
@@ -36,6 +69,9 @@ async def get_current_user(
         payload = jwt.decode(token, _settings.secret_key, algorithms=[_settings.algorithm])
         username: str | None = payload.get("sub")
         if username is None:
+            raise exc
+        jti: str | None = payload.get("jti")
+        if jti and await _is_revoked(jti):
             raise exc
     except JWTError:
         raise exc
