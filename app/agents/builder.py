@@ -1,7 +1,35 @@
+import os
+import re
 import yaml
 from pathlib import Path
+from typing import Any
 from pydantic import BaseModel, Field
 import structlog
+
+_ENV_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _interpolate_env(value: Any) -> Any:
+    """Recursively substitute ${VAR} placeholders with environment variable values.
+
+    Raises ValueError if a referenced variable is not set, so misconfigured secrets
+    fail loudly at startup rather than silently using an empty value.
+    """
+    if isinstance(value, str):
+        def _sub(m: re.Match) -> str:
+            var = m.group(1)
+            result = os.environ.get(var)
+            if result is None:
+                raise ValueError(
+                    f"Environment variable '{var}' referenced in agent config is not set"
+                )
+            return result
+        return _ENV_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _interpolate_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_env(v) for v in value]
+    return value  # int, float, bool, None — pass through unchanged
 
 log = structlog.get_logger()
 
@@ -49,6 +77,7 @@ def load_agents(config_dir: str = "config/agents") -> None:
             if not data:
                 log.warning("agent_yaml_empty", file=str(yaml_file))
                 continue
+            data = _interpolate_env(data)
             config = AgentConfig(**data)
             _agents[config.id] = config
             log.info("agent_loaded", agent_id=config.id, name=config.name,
@@ -59,7 +88,7 @@ def load_agents(config_dir: str = "config/agents") -> None:
             failed += 1
     log.info("agents_loaded", count=loaded, total_files=len(list(path.glob("*.yaml"))))
     if failed:
-        raise RuntimeError(f"{failed} agent file(s) failed to load — fix the errors above before starting.")
+        raise RuntimeError(f"{failed} agent file(s) failed to load. Fix the errors above before starting.")
 
 
 def get_agent(agent_id: str) -> AgentConfig:

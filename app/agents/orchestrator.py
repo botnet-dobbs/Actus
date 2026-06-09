@@ -100,7 +100,11 @@ async def _run_agent_inner(
         if event_queue is not None:
             await event_queue.put(event)
 
-    tools_desc = json.dumps(list(_tool_schemas.values()), indent=2)
+    allowed_schemas = [_tool_schemas[t] for t in config.tools if t in _tool_schemas]
+    unregistered = [t for t in config.tools if t not in _tool_schemas]
+    if unregistered:
+        bound_log.warning("agent_tools_not_registered", tools=unregistered)
+    tools_desc = json.dumps(allowed_schemas, indent=2)
     messages = [{"role": "system",
                  "content": config.system_prompt.rstrip() + "\n\n" + TOOL_CALL_PROMPT.format(tools=tools_desc)}]
 

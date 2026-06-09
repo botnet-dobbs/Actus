@@ -15,6 +15,7 @@ from app.auth.models import User
 from app.auth.jwt import require_role, write_audit_log
 from app.context.models import Workflow, WorkflowStatus
 from app.database import get_engine, get_session
+from app.limiter import limiter
 import structlog
 
 log = structlog.get_logger()
@@ -128,6 +129,7 @@ async def _run_workflow(workflow_id: int, triggered_by: int | None, ip_address: 
 # ── Trigger ───────────────────────────────────────────────────────────────────
 
 @router.post("/trigger/{agent_id}", status_code=202)
+@limiter.limit("10/minute")
 async def trigger_agent(
     agent_id: str,
     request: Request,
@@ -170,6 +172,7 @@ async def trigger_agent(
 # ── Webhook trigger ───────────────────────────────────────────────────────────
 
 @router.post("/webhooks/{agent_id}", status_code=202)
+@limiter.limit("30/minute")
 async def webhook_trigger(
     agent_id: str,
     request: Request,
@@ -240,9 +243,13 @@ async def list_workflows(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     session: Session = Depends(get_session),
-    _: User = Depends(require_role("analyst")),
+    user: User = Depends(require_role("analyst")),
 ):
     query = select(Workflow)
+    if user.role != "admin":
+        query = query.where(
+            (Workflow.created_by == user.id) | (Workflow.created_by == None)  # noqa: E711
+        )
     if agent_id:
         query = query.where(Workflow.agent_id == agent_id)
     if status:
@@ -255,10 +262,12 @@ async def list_workflows(
 async def get_workflow(
     workflow_id: int,
     session: Session = Depends(get_session),
-    _: User = Depends(require_role("analyst")),
+    user: User = Depends(require_role("analyst")),
 ):
     wf = session.get(Workflow, workflow_id)
     if not wf:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    if user.role != "admin" and wf.created_by is not None and wf.created_by != user.id:
         raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
     return wf
 
@@ -360,9 +369,13 @@ async def list_runs(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     session: Session = Depends(get_session),
-    _: User = Depends(require_role("analyst")),
+    user: User = Depends(require_role("analyst")),
 ):
     query = select(AgentRunLog)
+    if user.role != "admin":
+        query = query.where(
+            (AgentRunLog.triggered_by == user.id) | (AgentRunLog.triggered_by == None)  # noqa: E711
+        )
     if agent_id:
         query = query.where(AgentRunLog.agent_id == agent_id)
     if outcome:
@@ -381,10 +394,12 @@ async def list_runs(
 async def get_run(
     run_id: str,
     session: Session = Depends(get_session),
-    _: User = Depends(require_role("analyst")),
+    user: User = Depends(require_role("analyst")),
 ):
     run = session.exec(select(AgentRunLog).where(AgentRunLog.run_id == run_id)).first()
     if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    if user.role != "admin" and run.triggered_by is not None and run.triggered_by != user.id:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
     return run
 

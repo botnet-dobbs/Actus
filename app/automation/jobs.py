@@ -6,8 +6,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select, col, text
 from app.database import get_engine
 from app.context.store import ContextSnapshot
+from app.context.models import Workflow, WorkflowStatus
 from app.agents.builder import get_agent
-from app.agents.orchestrator import run_agent
+from app.agents.orchestrator import run_agent, AGENT_TOTAL_TIMEOUT
 import structlog
 
 log = structlog.get_logger()
@@ -94,6 +95,48 @@ async def run_customer_analysis() -> None:
         log.error("scheduled_agent_failed", job="customer_analysis", error=str(e), exc_info=True)
 
 
+_STUCK_WORKFLOW_BUFFER_SECONDS = 60
+STUCK_WORKFLOW_TIMEOUT_SECONDS = AGENT_TOTAL_TIMEOUT + _STUCK_WORKFLOW_BUFFER_SECONDS
+
+
+async def reap_stuck_workflows() -> int:
+    """Mark workflows stuck in 'running' longer than the total agent timeout as failed.
+
+    Targets crashes and process restarts that leave rows in running state permanently.
+    Safe to run from multiple processes concurrently. Idempotent due to status filter.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STUCK_WORKFLOW_TIMEOUT_SECONDS)
+    with Session(get_engine()) as session:
+        stuck = session.exec(
+            select(Workflow).where(
+                Workflow.status == WorkflowStatus.running,
+                col(Workflow.started_at) < cutoff,
+            )
+        ).all()
+        if not stuck:
+            return 0
+        now = datetime.now(timezone.utc)
+        for wf in stuck:
+            wf.status = WorkflowStatus.failed
+            wf.completed_at = now
+            wf.error = "Workflow timed out. Process restarted or crashed during run"
+            session.add(wf)
+            log.error(
+                "stuck_workflow_reaped",
+                workflow_id=wf.id,
+                agent_id=wf.agent_id,
+                started_at=str(wf.started_at),
+            )
+        try:
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            log.error("stuck_workflow_reap_failed", error=str(e))
+            raise
+        log.info("stuck_workflows_reaped", count=len(stuck))
+        return len(stuck)
+
+
 async def heartbeat() -> None:
     try:
         with Session(get_engine()) as session:
@@ -126,6 +169,14 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
         id="customer_analysis",
         replace_existing=True,
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        reap_stuck_workflows,
+        IntervalTrigger(minutes=5),
+        id="reap_stuck_workflows",
+        replace_existing=True,
+        misfire_grace_time=120,
         coalesce=True,
     )
     scheduler.add_job(

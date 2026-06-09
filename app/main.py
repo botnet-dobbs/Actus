@@ -2,9 +2,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from sqlmodel import Session, select
 from app.config import get_settings
 from app.database import get_session
+from app.limiter import limiter
 from app.llm.router import router as llm_router
 from app.ontology.router import router as ontology_router
 from app.auth.router import router as auth_router
@@ -71,6 +74,8 @@ def create_app() -> FastAPI:
         version=_settings.app_version,
         lifespan=lifespan,
     )
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # pyright: ignore[reportArgumentType]
     instrument_app(app)
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(

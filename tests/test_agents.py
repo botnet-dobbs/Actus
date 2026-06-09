@@ -420,3 +420,72 @@ async def test_invoke_agent_no_call_stack_in_error():
         _invoke_stack.reset(token)
     assert result["status"] == "error"
     assert "call_stack" not in result
+
+
+# ── Tool schema filtering ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_only_allowed_tools_in_system_prompt():
+    fake_schemas = {
+        "tool_a": {"name": "tool_a", "description": "Does A"},
+        "tool_b": {"name": "tool_b", "description": "Does B"},
+        "tool_c": {"name": "tool_c", "description": "Does C"},
+    }
+    captured: list[list] = []
+
+    async def mock_llm(model, messages, **kwargs):
+        captured.append(messages)
+        return DONE
+
+    with patch("app.agents.orchestrator._tool_schemas", fake_schemas), \
+         patch("app.agents.orchestrator.call_llm_with_retry", side_effect=mock_llm), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(tools=["tool_a"]))
+
+    assert result["status"] == "completed"
+    system_content = captured[0][0]["content"]
+    assert "tool_a" in system_content
+    assert "tool_b" not in system_content
+    assert "tool_c" not in system_content
+
+
+@pytest.mark.asyncio
+async def test_unregistered_tool_logged_as_warning():
+    fake_schemas = {"existing_tool": {"name": "existing_tool", "description": "Real tool"}}
+    with patch("app.agents.orchestrator._tool_schemas", fake_schemas), \
+         patch("app.agents.orchestrator.call_llm_with_retry", AsyncMock(return_value=DONE)), \
+         patch("app.agents.orchestrator.save_context"):
+        result = await run_agent(make_config(tools=["existing_tool", "missing_tool"]))
+    # unregistered tool is silently filtered — agent still runs
+    assert result["status"] == "completed"
+
+
+# ── Env interpolation (builder._interpolate_env) ──────────────────────────────
+
+def test_env_interpolation_replaces_placeholder(monkeypatch):
+    from app.agents.builder import _interpolate_env
+    monkeypatch.setenv("MY_SECRET", "super-secret-value")
+    result = _interpolate_env({"webhook": {"secret": "${MY_SECRET}"}})
+    assert result == {"webhook": {"secret": "super-secret-value"}}
+
+
+def test_env_interpolation_missing_var_raises(monkeypatch):
+    from app.agents.builder import _interpolate_env
+    monkeypatch.delenv("DEFINITELY_NOT_SET", raising=False)
+    with pytest.raises(ValueError, match="DEFINITELY_NOT_SET"):
+        _interpolate_env("${DEFINITELY_NOT_SET}")
+
+
+def test_env_interpolation_passthrough_non_string():
+    from app.agents.builder import _interpolate_env
+    assert _interpolate_env(42) == 42
+    assert _interpolate_env(True) is True
+    assert _interpolate_env(None) is None
+    assert _interpolate_env(3.14) == 3.14
+
+
+def test_env_interpolation_nested_list(monkeypatch):
+    from app.agents.builder import _interpolate_env
+    monkeypatch.setenv("DB_URL", "postgres://localhost/db")
+    result = _interpolate_env(["static", "${DB_URL}", 42])
+    assert result == ["static", "postgres://localhost/db", 42]

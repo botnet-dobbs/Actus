@@ -6,9 +6,8 @@ from litellm.exceptions import APIConnectionError, Timeout, ServiceUnavailableEr
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from app.config import get_settings
+from app.limiter import limiter
 from app.llm.models import CompletionRequest, CompletionResponse
 from app.llm.pii import scrub_pii
 from app.observability.metrics import llm_calls_total, llm_latency
@@ -16,14 +15,6 @@ import structlog
 
 log = structlog.get_logger()
 router = APIRouter()
-
-
-def _get_user_id_or_ip(request: Request) -> str:
-    user_id = getattr(request.state, "user_id", None)
-    return str(user_id) if user_id else get_remote_address(request)
-
-
-limiter = Limiter(key_func=_get_user_id_or_ip)
 
 _settings = get_settings()
 

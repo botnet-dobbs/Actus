@@ -520,3 +520,197 @@ def test_webhook_github_header_accepted(client, engine):
             headers={"X-Hub-Signature-256": sig},   # GitHub's header name
         )
     assert resp.status_code == 202
+
+
+# ── Stuck workflow reaper ─────────────────────────────────────────────────────
+
+def seed_workflow_full(
+    engine,
+    *,
+    agent_id: str = "test-agent",
+    status: str = "running",
+    started_at: datetime | None = None,
+    created_by: int | None = None,
+) -> int:
+    with Session(engine) as session:
+        wf = Workflow(
+            name="Test",
+            agent_id=agent_id,
+            status=WorkflowStatus(status),
+            created_by=created_by,
+            started_at=started_at,
+        )
+        session.add(wf)
+        session.commit()
+        session.refresh(wf)
+        return wf.id
+
+
+@pytest.mark.asyncio
+async def test_reap_stuck_workflows_marks_as_failed(engine):
+    from datetime import timedelta
+    from app.automation.jobs import reap_stuck_workflows, STUCK_WORKFLOW_TIMEOUT_SECONDS
+
+    old_start = datetime.now(timezone.utc) - timedelta(seconds=STUCK_WORKFLOW_TIMEOUT_SECONDS + 10)
+    wf_id = seed_workflow_full(engine, status="running", started_at=old_start)
+
+    count = await reap_stuck_workflows()
+    assert count == 1
+
+    with Session(engine) as session:
+        wf = session.get(Workflow, wf_id)
+        assert wf.status == WorkflowStatus.failed
+        assert wf.error is not None
+        assert wf.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_reap_leaves_recent_running_workflows(engine):
+    from datetime import timedelta
+    from app.automation.jobs import reap_stuck_workflows
+
+    recent_start = datetime.now(timezone.utc) - timedelta(seconds=60)
+    wf_id = seed_workflow_full(engine, status="running", started_at=recent_start)
+
+    count = await reap_stuck_workflows()
+    assert count == 0
+
+    with Session(engine) as session:
+        wf = session.get(Workflow, wf_id)
+        assert wf.status == WorkflowStatus.running
+
+
+@pytest.mark.asyncio
+async def test_reap_leaves_completed_workflows(engine):
+    from datetime import timedelta
+    from app.automation.jobs import reap_stuck_workflows, STUCK_WORKFLOW_TIMEOUT_SECONDS
+
+    old_start = datetime.now(timezone.utc) - timedelta(seconds=STUCK_WORKFLOW_TIMEOUT_SECONDS + 10)
+    wf_id = seed_workflow_full(engine, status="completed", started_at=old_start)
+
+    count = await reap_stuck_workflows()
+    assert count == 0
+
+    with Session(engine) as session:
+        wf = session.get(Workflow, wf_id)
+        assert wf.status == WorkflowStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_reap_returns_count(engine):
+    from datetime import timedelta
+    from app.automation.jobs import reap_stuck_workflows, STUCK_WORKFLOW_TIMEOUT_SECONDS
+
+    old_start = datetime.now(timezone.utc) - timedelta(seconds=STUCK_WORKFLOW_TIMEOUT_SECONDS + 10)
+    seed_workflow_full(engine, status="running", started_at=old_start)
+    seed_workflow_full(engine, status="running", started_at=old_start)
+
+    count = await reap_stuck_workflows()
+    assert count == 2
+
+
+# ── Workflow visibility scoping ───────────────────────────────────────────────
+
+def test_analyst_sees_own_workflows_only(client, engine):
+    user1 = seed_user(engine, "vis_wf_a1", "analyst")
+    user2 = seed_user(engine, "vis_wf_a2", "analyst")
+    token1 = get_token(client, "vis_wf_a1")
+
+    seed_workflow_full(engine, created_by=user1.id, status="completed")
+    seed_workflow_full(engine, created_by=user2.id, status="completed")
+
+    resp = client.get("/automation/workflows", headers=auth_header(token1))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["created_by"] == user1.id
+
+
+def test_analyst_sees_webhook_triggered_workflows(client, engine):
+    user1 = seed_user(engine, "vis_wf_hook", "analyst")
+    token1 = get_token(client, "vis_wf_hook")
+
+    # created_by=None means webhook/scheduled — visible to all analysts
+    seed_workflow_full(engine, created_by=None, status="completed")
+
+    resp = client.get("/automation/workflows", headers=auth_header(token1))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_analyst_cannot_see_other_analysts_workflow(client, engine):
+    user1 = seed_user(engine, "vis_wf_b1", "analyst")
+    user2 = seed_user(engine, "vis_wf_b2", "analyst")
+    token1 = get_token(client, "vis_wf_b1")
+
+    wf_id = seed_workflow_full(engine, created_by=user2.id, status="completed")
+
+    resp = client.get(f"/automation/workflows/{wf_id}", headers=auth_header(token1))
+    assert resp.status_code == 404
+
+
+def test_admin_sees_all_workflows(client, engine):
+    user1 = seed_user(engine, "vis_wf_adm1", "analyst")
+    user2 = seed_user(engine, "vis_wf_adm2", "analyst")
+    admin = seed_user(engine, "vis_wf_admin", "admin")
+    token_admin = get_token(client, "vis_wf_admin")
+
+    seed_workflow_full(engine, created_by=user1.id, status="completed")
+    seed_workflow_full(engine, created_by=user2.id, status="completed")
+
+    resp = client.get("/automation/workflows", headers=auth_header(token_admin))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+# ── Run log visibility scoping ────────────────────────────────────────────────
+
+def test_analyst_sees_own_runs_only(client, engine):
+    user1 = seed_user(engine, "vis_run_a1", "analyst")
+    user2 = seed_user(engine, "vis_run_a2", "analyst")
+    token1 = get_token(client, "vis_run_a1")
+
+    seed_run_log(engine, triggered_by=user1.id)
+    seed_run_log(engine, triggered_by=user2.id)
+
+    resp = client.get("/automation/runs", headers=auth_header(token1))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["triggered_by"] == user1.id
+
+
+def test_analyst_sees_webhook_triggered_runs(client, engine):
+    user1 = seed_user(engine, "vis_run_hook", "analyst")
+    token1 = get_token(client, "vis_run_hook")
+
+    seed_run_log(engine, triggered_by=None)
+
+    resp = client.get("/automation/runs", headers=auth_header(token1))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_analyst_cannot_see_other_analysts_run(client, engine):
+    user1 = seed_user(engine, "vis_run_b1", "analyst")
+    user2 = seed_user(engine, "vis_run_b2", "analyst")
+    token1 = get_token(client, "vis_run_b1")
+
+    run_id = seed_run_log(engine, triggered_by=user2.id)
+
+    resp = client.get(f"/automation/runs/{run_id}", headers=auth_header(token1))
+    assert resp.status_code == 404
+
+
+def test_admin_sees_all_runs(client, engine):
+    user1 = seed_user(engine, "vis_run_adm1", "analyst")
+    user2 = seed_user(engine, "vis_run_adm2", "analyst")
+    seed_user(engine, "vis_run_admin", "admin")
+    token_admin = get_token(client, "vis_run_admin")
+
+    seed_run_log(engine, triggered_by=user1.id)
+    seed_run_log(engine, triggered_by=user2.id)
+
+    resp = client.get("/automation/runs", headers=auth_header(token_admin))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
