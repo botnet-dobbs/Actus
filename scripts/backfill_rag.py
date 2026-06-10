@@ -34,7 +34,7 @@ def main() -> None:
         for type_name in list_types():
             cls = get_type(type_name)
             objects = session.exec(
-                select(cls).where(cls.is_deleted == False)
+                select(cls).where(cls.is_deleted.is_(False))
             ).all()
             print(f"{type_name}: {len(objects)} objects")
             for obj in objects:

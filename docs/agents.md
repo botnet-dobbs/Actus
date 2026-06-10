@@ -4,48 +4,24 @@ Everything you need to build, register, invoke, and test agents on this platform
 
 ---
 
-## Architecture overview
+## How an agent run works
 
-```
-POST /automation/trigger/{agent_id}
-        │  extra_context (file_path, question, …)
-        ▼
-  Workflow row created → returns {workflow_id}
-        │
-        ├──────────────────────────────────────────────┐
-        │  background task                              │  SSE client
-        ▼                                              ▼
-  run_agent_with_timeout()          ← 600 s   GET /automation/workflows/{id}/stream
-        │                                              │
-        ▼                                              ├─ immediate status event (from DB)
-  _run_agent_inner(event_queue)                        │
-        │                                              │  live queue path (same process):
-        ├─ pre-loop RAG retrieval                      ├─ iteration_start events
-        ├─ extra_context injected as user message      ├─ tool_call / tool_result events
-        │                                              ├─ done event
-        └─ ReAct loop  (up to max_iterations)          │
-                │                                      │  DB-poll fallback (reconnect/LB):
-                ├─ call_llm_with_retry()   ← 120 s     ├─ polls every 1 s until terminal
-                │        asyncio.wait_for              │
-                ├─ emit iteration_start/tool events ───┘
-                ├─ run_tool()              ← 30 s / 600 s for long-running tools
-                └─ repeat until done / budget / max_iterations / timeout
-        │
-        ▼
-  Workflow.status → completed / failed / timeout
-  AgentRunLog row written
-  SSE sentinel emitted → final WorkflowResponse delivered to stream
-```
+1. You trigger an agent (via API call, webhook, or cron schedule). Actus creates a workflow record and runs the agent in the background.
+2. If the agent has `rag_query_template` set, Actus retrieves relevant context first and gives it to the agent.
+3. The agent then loops: it asks the LLM what to do, calls a tool if needed, looks at the result, and repeats. This continues until the agent reports it's done, or it hits a limit (`max_iterations`, `token_budget`, or a timeout).
+4. The final result is saved to the workflow and to the run log. If you're streaming, you see each step (`iteration_start`, `tool_call`, `tool_result`, `done`) as it happens.
+
+You don't need to manage any of this. Your job is to write the agent's YAML config, the tools it can call, and (optionally) a system prompt that tells it how to behave.
 
 ---
 
 ## YAML agent configuration
 
-Every `.yaml` file in `config/agents/` is loaded at startup and hot-reloadable via `POST /automation/reload`.
+Every `.yaml` file in `config/agents/` is loaded at startup and hot-reloadable via `POST /v1/automation/reload`.
 
 ```yaml
 # Required
-id: my_agent                    # used in API calls: POST /automation/trigger/my_agent
+id: my_agent                    # used in API calls: POST /v1/automation/trigger/my_agent
 name: My Agent                  # human-readable label
 description: What this agent does
 
@@ -67,7 +43,7 @@ tools:
 # RAG pre-loop context (runs BEFORE the loop starts)
 # If set, retrieves top-k documents and injects them as the first user message.
 # Use {key} placeholders filled from extra_context.
-# Set to "" to disable — mandatory for document agents to avoid unrelated pre-loading.
+# Set to "" to disable. Mandatory for document agents, to avoid unrelated pre-loading.
 rag_query_template: "invoices for client {client_name}"
 rag_top_k: 5
 
@@ -78,16 +54,18 @@ api_base: ""
 schedule:
   cron: "0 9 * * 1-5"          # weekdays at 09:00
 
-# System prompt — the agent's personality and step instructions
+# System prompt: the agent's personality and step instructions
 system_prompt: |
   You are a specialist agent. Follow these steps exactly:
 
-  STEP 1 — …
-  STEP 2 — …
+  STEP 1: …
+  STEP 2: …
   …
 
   RULES: …
 ```
+
+Two advanced fields aren't shown above because most agents don't need them: `output_schema` (enforce a JSON Schema on the final result) and `native_tools` (override how tool calls are formatted for the model). See the field reference below.
 
 ### Field reference
 
@@ -95,7 +73,7 @@ system_prompt: |
 |---|---|---|---|
 | `id` | str | required | URL-safe, unique across all agents |
 | `name` | str | required | Display name |
-| `description` | str | `""` | Shown in agent listings |
+| `description` | str | `""` | Human-readable summary of what the agent does |
 | `model` | str | `ollama/mistral` | Any LiteLLM model string |
 | `temperature` | float | `0.7` | 0.1 for factual/structured tasks |
 | `max_response_tokens` | int | `1024` | Per LLM call; max 8192 |
@@ -104,9 +82,14 @@ system_prompt: |
 | `tools` | list[str] | `[]` | Only listed tools are callable |
 | `rag_query_template` | str | `""` | `""` disables pre-loop RAG entirely |
 | `rag_top_k` | int | `5` | Documents retrieved pre-loop |
+| `system_prompt` | str | `""` | The agent's instructions; effectively required for any real agent |
 | `api_base` | str | `""` | Overrides `OLLAMA_BASE_URL` for this agent |
-| `schedule.cron` | str | None | APScheduler cron expression |
-| `webhook.secret` | str | None | HMAC-SHA256 secret; enables `POST /automation/webhooks/{id}` |
+| `schedule.cron` | str | None | Optional. APScheduler cron expression, see [Scheduling agents](#scheduling-agents) |
+| `webhook.secret` | str | None | Optional. HMAC-SHA256 secret; enables `POST /v1/automation/webhooks/{id}` |
+| `output_schema` | dict (JSON Schema) | None | Optional. If set, the agent's final result must validate against this schema. An invalid result is sent back to the agent for correction (up to 2 retries) |
+| `native_tools` | bool | None | Optional. Force native function-calling on (`true`) or off (`false`). By default, non-Ollama models use native tool calling and `ollama/*` models use the JSON protocol described in [The ReAct loop](#the-react-loop) |
+
+To see which agents and tools are currently available, check `config/agents/*.yaml` for agent definitions and each agent's `tools.py` (plus `app/agents/tools.py` for shared tools) for what they can call.
 
 ---
 
@@ -139,19 +122,17 @@ async def fetch_data(record_id: int) -> dict:
 
 ### What the decorator does
 
-1. Registers the function in `_tools[name]`
-2. Introspects type hints and defaults to build `_tool_schemas[name]` the JSON manifest the LLM receives
-3. Both sync and async functions are supported; sync functions run in `asyncio.get_running_loop().run_in_executor(None, …)` to avoid blocking the event loop
+The `@tool` decorator registers your function under the given name and builds the description the LLM sees, based on your function's type hints and defaults. Both sync and async functions are supported; sync functions are run in a background thread automatically, so a slow or blocking function won't freeze other agents.
 
 ### Tool return values
 
 Return any JSON-serialisable value: `dict`, `list`, `str`, `int`. The orchestrator serialises it with `json.dumps(output, default=str)` and appends it as a user message to the conversation.
 
-On failure, raise an exception, the orchestrator catches it and reports `{"error": "…"}` to the LLM.
+On failure, raise an exception. The orchestrator catches it and reports `{"error": "…"}` to the LLM.
 
 ### Registering tools at startup
 
-Place your tools in `app/agents/{agent_id}/tools.py` and they are discovered automatically. At startup, `discover_tools()` scans every `app/agents/*/tools.py` and imports it — no changes to `main.py` needed.
+Place your tools in `app/agents/{agent_id}/tools.py` and they are discovered automatically. At startup, `discover_tools()` scans every `app/agents/*/tools.py` and imports it. No changes to `main.py` needed.
 
 ```
 app/
@@ -165,7 +146,7 @@ app/
         └── tools.py      ← only tools.py needed if no HTTP routes or DB tables
 ```
 
-Three convention files — all optional except `tools.py` for tool-only agents:
+There are three convention files, and all of them are optional except `tools.py` for tool-only agents:
 
 | File | Auto-loaded when | Requirement |
 |---|---|---|
@@ -173,7 +154,7 @@ Three convention files — all optional except `tools.py` for tool-only agents:
 | `router.py` | if present | export `router = APIRouter(prefix="…", tags=["…"])` |
 | `models.py` | if present | define `SQLModel` table classes |
 
-Tools are global — once registered, any agent that lists the tool name in its `tools:` YAML can call it.
+Tools are global. Once registered, any agent that lists the tool name in its `tools:` YAML can call it.
 
 ### Long-running tools
 
@@ -189,7 +170,26 @@ _LONG_RUNNING_TOOLS = {
 }
 ```
 
-Long-running tools inherit `AGENT_TOTAL_TIMEOUT` (600 s) as their timeout instead of 30 s. Add only tools that genuinely need it — a 30 s limit is a good guardrail against hung tools.
+Long-running tools inherit the agent's overall timeout (10 minutes) instead of 30 s. Add only tools that genuinely need it. A 30 s limit is a good guardrail against hung tools.
+
+---
+
+## Scheduling agents
+
+Add a `schedule.cron` field to an agent's YAML to run it automatically:
+
+```yaml
+schedule:
+  cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC
+```
+
+This is a standard 5-field crontab expression (minute, hour, day-of-month, month, day-of-week), evaluated in UTC.
+
+A few things to keep in mind for scheduled agents:
+
+- **No input context.** Scheduled runs always start with empty `extra_context`. The agent can't be handed data at trigger time, so it should get everything it needs from its tools, the ontology, or RAG search.
+- **No live stream.** There's no workflow to watch and no `/stream` endpoint for scheduled runs. Check the outcome via the audit log (`/v1/automation/runs`).
+- **Restart to apply.** Schedules are loaded once when the server starts. Adding or changing `schedule.cron` requires a server restart, not just `POST /v1/automation/reload`.
 
 ---
 
@@ -197,7 +197,7 @@ Long-running tools inherit `AGENT_TOTAL_TIMEOUT` (600 s) as their timeout instea
 
 Each iteration:
 
-1. **LLM call** full message history sent to the model, 120 s timeout via `asyncio.wait_for`
+1. **LLM call** full message history sent to the model, with a timeout
 2. **Parse** extract JSON from response (handles markdown fences, leading/trailing text)
 3. **Act** one of three paths:
    - `{"done": true, "result": "…", "confidence": 0.9}` → agent finishes
@@ -219,6 +219,53 @@ Each iteration:
 ### Tool authorisation
 
 Agents can only call tools listed in their `tools:` YAML key. Attempts to call unlisted tools are blocked by the orchestrator; the LLM receives an error message and is told what tools are available.
+
+---
+
+## Ontology: domain data
+
+Ontology is Actus's shared store for your domain data (customers, invoices, tickets, whatever your business runs on). It is platform-wide, not specific to any one agent. This is what `semantic_search` and pre-loop RAG search over.
+
+It is defined in `app/ontology/models.py` and is separate from an agent's own `models.py` (see [Three convention files](#registering-tools-at-startup) above). Per-agent `models.py` files are for tables that belong to that agent only (a `doc_qa` session table, for example) and are not searchable by `semantic_search` unless they are also registered as ontology types.
+
+### Defining a new ontology type
+
+```python
+# app/ontology/models.py
+from sqlmodel import Field
+from app.ontology.registry import register
+from app.ontology.models import OntologyObjectBase
+
+@register("Invoice")
+class Invoice(OntologyObjectBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    number: str = Field(unique=True, index=True)
+    client: str
+    amount: float
+    status: str = "unpaid"
+```
+
+`OntologyObjectBase` provides `created_at`, `updated_at`, `created_by`, and soft-delete fields automatically. After adding a type, generate and run a migration:
+
+```bash
+make migrations msg="add_invoice"
+make migrate
+```
+
+### CRUD API
+
+Every registered type gets full CRUD endpoints automatically:
+
+| Endpoint | Notes |
+|---|---|
+| `GET /v1/ontology/types` | List all registered type names |
+| `GET /v1/ontology/objects/{type_name}` | List objects (paginated) |
+| `GET /v1/ontology/objects/{type_name}/{id}` | Get one object |
+| `POST /v1/ontology/objects/{type_name}` | Create. Auth required |
+| `PUT /v1/ontology/objects/{type_name}/{id}` | Update. Auth required |
+| `DELETE /v1/ontology/objects/{type_name}/{id}` | Soft delete. Auth required |
+
+Create, update, and delete automatically re-index the object into pgvector in the background, so it is immediately searchable via `semantic_search` and pre-loop RAG.
 
 ---
 
@@ -269,7 +316,7 @@ The extra_context is PII-scrubbed before being sent to the LLM (`DATE_TIME` enti
 ### Trigger via API
 
 ```bash
-curl -X POST http://localhost:8000/automation/trigger/my_agent \
+curl -X POST http://localhost:8000/v1/automation/trigger/my_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"extra_context": {"key": "value"}}'
@@ -277,10 +324,12 @@ curl -X POST http://localhost:8000/automation/trigger/my_agent \
 
 Response: `{"status": "queued", "agent_id": "my_agent", "workflow_id": 42}`
 
+Streaming and polling are optional. Many agents do their real work through their tools (sending an email, posting to Slack, updating a record) and the caller doesn't need to wait around for a "result" at all. This is the normal pattern for webhook-triggered and scheduled agents: trigger it and move on, and check `/v1/automation/runs` later if you need to confirm what happened. Use streaming or polling when a user or another system is waiting on the agent's answer.
+
 ### Stream the result (preferred)
 
 ```bash
-curl -N "http://localhost:8000/automation/workflows/42/stream" \
+curl -N "http://localhost:8000/v1/automation/workflows/42/stream" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -295,12 +344,12 @@ data: {"type": "done", "run_id": "abc", "status": "completed", "result": "...", 
 data: {"id": 42, "status": "completed", "result_json": "...", ...}
 ```
 
-The stream is reconnectable — disconnect and re-open with the same `workflow_id` at any time.
+The stream is reconnectable. Disconnect and re-open with the same `workflow_id` at any time.
 
 ### Poll for result (alternative)
 
 ```bash
-watch -n 2 curl -s "http://localhost:8000/automation/workflows/42" \
+watch -n 2 curl -s "http://localhost:8000/v1/automation/workflows/42" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -324,25 +373,25 @@ system_prompt: |
   Score it 1-10 and call qualify_lead with the score.
 ```
 
-The external system signs the request body and sends it to `POST /automation/webhooks/{agent_id}`:
+The external system signs the request body and sends it to `POST /v1/automation/webhooks/{agent_id}`:
 
 ```bash
 BODY='{"email": "alice@example.com", "plan": "enterprise"}'
 SECRET="generate-with-openssl-rand-hex-32"
 SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')"
 
-curl -X POST http://localhost:8000/automation/webhooks/lead_qualifier \
+curl -X POST http://localhost:8000/v1/automation/webhooks/lead_qualifier \
   -H "Content-Type: application/json" \
   -H "X-Actus-Signature: $SIG" \
   -d "$BODY"
 # → {"status": "queued", "agent_id": "lead_qualifier", "workflow_id": 7}
 ```
 
-The JSON body becomes `extra_context` directly — the agent reads it via `context["email"]`, `context["plan"]`, etc. Arrays are wrapped as `{"payload": [...]}`. Non-JSON bodies are wrapped as `{"raw": "..."}`.
+The JSON body becomes `extra_context` directly: the agent reads it via `context["email"]`, `context["plan"]`, etc. Arrays are wrapped as `{"payload": [...]}`. Non-JSON bodies are wrapped as `{"raw": "..."}`.
 
-**GitHub webhooks** send `X-Hub-Signature-256` — Actus accepts it without any configuration. Point the GitHub webhook URL at `/automation/webhooks/{agent_id}` and use the same secret.
+**GitHub webhooks** send `X-Hub-Signature-256`. Actus accepts it without any configuration. Point the GitHub webhook URL at `/v1/automation/webhooks/{agent_id}` and use the same secret.
 
-No JWT is needed — the HMAC signature is the authentication mechanism.
+No JWT is needed. The HMAC signature is the authentication mechanism.
 
 ---
 
@@ -358,8 +407,8 @@ No JWT is needed — the HMAC signature is the authentication mechanism.
 
 | Pattern | Tool | When to use |
 |---|---|---|
-| **Sequential pipeline** | `invoke_agent` | Agents must run in order — output of one feeds the next |
-| **Parallel execution** | `invoke_agents_parallel` | Agents are independent — run concurrently, merge results |
+| **Sequential pipeline** | `invoke_agent` | Agents must run in order, output of one feeds the next |
+| **Parallel execution** | `invoke_agents_parallel` | Agents are independent, run concurrently and merge results |
 | **Hierarchical manager-specialist** | Either | Manager agent decomposes and delegates; depth limit (5) and cycle detection enforced automatically |
 
 ### Agent-to-agent invocation
@@ -379,29 +428,28 @@ system_prompt: |
   3. Synthesise results and call done.
 ```
 
-**Cycle detection** — `invoke_agent` tracks the invocation stack. If agent A calls agent B which calls agent A, the second call is rejected with `"Circular invocation detected"`. Max depth is 5.
+**Cycle detection**: `invoke_agent` tracks the invocation stack. If agent A calls agent B which calls agent A, the second call is rejected with `"Circular invocation detected"`. Max depth is 5.
 
-**Parallel cap** — `invoke_agents_parallel` rejects batches larger than 10 with a single error result rather than N identical errors.
+**Parallel cap**: `invoke_agents_parallel` rejects batches larger than 10 with a single error result rather than N identical errors.
 
 ---
 
 ## Timeouts reference
 
-| Timeout | Value | What it controls |
+| Timeout | Value | What it covers |
 |---|---|---|
-| `AGENT_TOTAL_TIMEOUT` | 600 s | `asyncio.wait_for` wrapping the entire `run_agent` coroutine |
-| `LLM_PER_CALL_TIMEOUT` | 120 s | `asyncio.wait_for` wrapping each `call_llm_with_retry` call |
-| Default tool timeout | 30 s | `run_tool` for any tool not in `_LONG_RUNNING_TOOLS` |
-| Long-running tool timeout | 600 s | `run_tool` for tools in `_LONG_RUNNING_TOOLS` |
+| Total agent run | 10 minutes | The whole agent run, from first iteration to final result |
+| Each LLM call | 120 s | A single request to the model |
+| Default tool timeout | 30 s | Any tool not marked as long-running |
+| Long-running tool timeout | 10 minutes | Tools marked long-running (see [Long-running tools](#long-running-tools)) |
 
-> **Why `asyncio.wait_for` and not the LiteLLM `timeout` kwarg?**  
-> LiteLLM's `timeout` parameter is not reliably honoured for local Ollama inference, the HTTP read does not cancel at the asyncio level. `asyncio.wait_for` injects `CancelledError` into the coroutine stack, which is the only reliable cancellation mechanism for async code.
+If an agent hits the total run timeout, the workflow is marked as failed with a timeout error.
 
 ---
 
 ## Audit logging
 
-Every agent run (success, error, timeout) writes a row to `agent_run_logs` via `log_agent_run()` in `app/agents/audit.py`. The record contains:
+Every agent run (success, error, timeout) writes a row to the audit log. The record contains:
 
 | Column | Notes |
 |---|---|
@@ -418,7 +466,7 @@ Every agent run (success, error, timeout) writes a row to `agent_run_logs` via `
 
 ---
 
-## Building a new agent — step by step
+## Building a new agent, step by step
 
 ### 1. Create the agent module
 
@@ -481,25 +529,27 @@ system_prompt: |
 
 ### 5. No server restart needed
 
-Uvicorn runs with `--reload` in Docker. The tool module import is picked up on reload. The YAML is volume-mounted and re-read on `POST /automation/reload` or on the next server restart.
+Uvicorn runs with `--reload` in Docker. The tool module import is picked up on reload. The YAML is volume-mounted and re-read on `POST /v1/automation/reload` or on the next server restart.
+
+Exception: if your YAML sets `schedule.cron`, a restart is required for the schedule itself to take effect (see [Scheduling agents](#scheduling-agents)).
 
 ### 6. Trigger and verify
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8000/v1/auth/login \
   -d "username=alice&password=changeme123" | jq -r .access_token)
 
-WF_ID=$(curl -s -X POST http://localhost:8000/automation/trigger/my_agent \
+WF_ID=$(curl -s -X POST http://localhost:8000/v1/automation/trigger/my_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"extra_context": {"input": "hello world"}}' | jq -r .workflow_id)
 
 # Stream live progress (recommended)
-curl -N "http://localhost:8000/automation/workflows/$WF_ID/stream" \
+curl -N "http://localhost:8000/v1/automation/workflows/$WF_ID/stream" \
   -H "Authorization: Bearer $TOKEN"
 
 # Or watch the poll endpoint (alternative)
-watch -n 2 curl -s "http://localhost:8000/automation/workflows/$WF_ID" \
+watch -n 2 curl -s "http://localhost:8000/v1/automation/workflows/$WF_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -578,5 +628,4 @@ uv run python -m pytest tests/ -v
 | Silence context save | `patch("app.agents.orchestrator.save_context")` |
 | Simulate tool authorisation block | Give config `tools=["allowed"]` and have LLM call `"other_tool"` |
 | Test token budget | Use `token_budget=50` with a response that has `total_tokens=200` |
-| Test cycle detection | Set `_invoke_stack` via `token = _invoke_stack.set(["agent-a"]); …; _invoke_stack.reset(token)` |
-| SQLite in tests | All DB tests use SQLite in-memory; pgvector tools no-op when `_is_postgres()` is false |
+| SQLite in tests | All DB tests use SQLite in-memory; pgvector-backed features (RAG, semantic search) no-op on SQLite |

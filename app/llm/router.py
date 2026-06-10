@@ -2,13 +2,13 @@ import asyncio
 import logging
 import time
 import litellm
-from litellm.exceptions import APIConnectionError, Timeout, ServiceUnavailableError, RateLimitError
+from litellm.exceptions import APIConnectionError, ServiceUnavailableError, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from app.config import get_settings
 from app.limiter import limiter
-from app.llm.models import CompletionRequest, CompletionResponse
+from app.llm.models import CompletionRequest, CompletionResponse, UsageInfo
 from app.llm.pii import scrub_pii_async
 from app.observability.metrics import llm_calls_total, llm_latency
 import structlog
@@ -96,7 +96,11 @@ async def complete(request: Request, req: CompletionRequest):
     return CompletionResponse(
         content=response.choices[0].message.content,  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
         model=response.model,  # pyright: ignore[reportArgumentType]
-        usage=dict(response.usage),  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
+        usage=UsageInfo(
+            prompt_tokens=response.usage.prompt_tokens,  # pyright: ignore[reportAttributeAccessIssue]
+            completion_tokens=response.usage.completion_tokens,  # pyright: ignore[reportAttributeAccessIssue]
+            total_tokens=response.usage.total_tokens,  # pyright: ignore[reportAttributeAccessIssue]
+        ),
         pii_detected=pii_found,
         request_id=getattr(request.state, "request_id", None),
     )

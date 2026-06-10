@@ -6,7 +6,7 @@ import jwt
 from jwt import PyJWTError
 from app.config import get_settings
 from pydantic import BaseModel, ConfigDict
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from app.database import get_session
 from app.auth.models import Team, User, VALID_ROLES, hash_password_async, verify_password_async
 from app.auth.jwt import (
@@ -90,7 +90,7 @@ async def register(
     session: Session = Depends(get_session),
 ):
     existing = session.exec(
-        select(User).where(User.username == req.username, User.is_deleted == False)
+        select(User).where(User.username == req.username, col(User.is_deleted).is_(False))
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken")
@@ -120,7 +120,7 @@ async def login(
     ip = request.client.host if request.client else None
 
     user = session.exec(
-        select(User).where(User.username == form.username, User.is_deleted == False)
+        select(User).where(User.username == form.username, col(User.is_deleted).is_(False))
     ).first()
 
     def fail(detail: str) -> NoReturn:
@@ -192,7 +192,7 @@ async def refresh(req: RefreshRequest, session: Session = Depends(get_session)):
     if old_jti and await _is_revoked(old_jti):
         raise exc
 
-    user = session.exec(select(User).where(User.username == username, User.is_deleted == False)).first()
+    user = session.exec(select(User).where(User.username == username, col(User.is_deleted).is_(False))).first()
     if not user or not user.is_active or user.is_locked():
         raise exc
 
@@ -238,7 +238,7 @@ async def assign_role(
         raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
 
     target = session.exec(
-        select(User).where(User.id == user_id, User.is_deleted == False)
+        select(User).where(User.id == user_id, col(User.is_deleted).is_(False))
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -263,7 +263,7 @@ async def list_users(
     _: User = Depends(require_role("admin")),
 ):
     return session.exec(
-        select(User).where(User.is_deleted == False).offset(offset).limit(limit)
+        select(User).where(col(User.is_deleted).is_(False)).offset(offset).limit(limit)
     ).all()
 
 
@@ -274,7 +274,7 @@ async def delete_user(
     admin: User = Depends(require_role("admin")),
 ):
     target = session.exec(
-        select(User).where(User.id == user_id, User.is_deleted == False)
+        select(User).where(User.id == user_id, col(User.is_deleted).is_(False))
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -298,7 +298,7 @@ async def reset_password(
     admin: User = Depends(require_role("admin")),
 ):
     target = session.exec(
-        select(User).where(User.id == user_id, User.is_deleted == False)
+        select(User).where(User.id == user_id, col(User.is_deleted).is_(False))
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -324,7 +324,7 @@ async def create_team(
     admin: User = Depends(require_role("admin")),
 ):
     existing = session.exec(
-        select(Team).where(Team.name == req.name, Team.is_deleted == False)
+        select(Team).where(Team.name == req.name, col(Team.is_deleted).is_(False))
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Team name already taken")
@@ -342,7 +342,7 @@ async def list_teams(
     session: Session = Depends(get_session),
     _: User = Depends(require_role("admin")),
 ):
-    return session.exec(select(Team).where(Team.is_deleted == False)).all()
+    return session.exec(select(Team).where(col(Team.is_deleted).is_(False))).all()
 
 
 @router.patch("/users/{user_id}/team", response_model=UserResponse)
@@ -353,14 +353,14 @@ async def assign_team(
     admin: User = Depends(require_role("admin")),
 ):
     target = session.exec(
-        select(User).where(User.id == user_id, User.is_deleted == False)
+        select(User).where(User.id == user_id, col(User.is_deleted).is_(False))
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
     if req.team_id is not None:
         team = session.exec(
-            select(Team).where(Team.id == req.team_id, Team.is_deleted == False)
+            select(Team).where(Team.id == req.team_id, col(Team.is_deleted).is_(False))
         ).first()
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")

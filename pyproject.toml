@@ -39,4 +39,10 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.14",
+    "types-pyyaml>=6.0.0",
+    "types-jsonschema>=4.0.0",
 ]
+
+[[tool.mypy.overrides]]
+module = ["apscheduler.*", "pgvector.*"]
+ignore_missing_imports = true

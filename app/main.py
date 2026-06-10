@@ -81,7 +81,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # pyright: ignore[reportArgumentType]
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     instrument_app(app)
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(
@@ -158,4 +158,4 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+app = create_app()  # type: ignore[assignment]

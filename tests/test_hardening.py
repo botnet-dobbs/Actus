@@ -9,6 +9,7 @@ Tests for production hardening fixes:
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from apscheduler.schedulers.base import STATE_RUNNING
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
@@ -27,12 +28,6 @@ def engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    import app.auth.models
-    import app.ontology.models
-    import app.context.store
-    import app.context.models
-    import app.agents.audit
-    import app.rag.models
     SQLModel.metadata.create_all(test_engine)
 
     original = db_module._engine
@@ -48,12 +43,14 @@ def client(engine):
         with Session(engine) as session:
             yield session
 
-    with patch("app.main.instrument_app"):
+    with patch("app.main.instrument_app"), \
+            patch("app.main.start_scheduler"), \
+            patch("app.main.stop_scheduler", new=AsyncMock()):
         application = create_app()
-    application.dependency_overrides[get_session] = override_session
+        application.dependency_overrides[get_session] = override_session
 
-    with TestClient(application, raise_server_exceptions=False) as c:
-        yield c
+        with TestClient(application, raise_server_exceptions=False) as c:
+            yield c
 
     application.dependency_overrides.clear()
 
@@ -69,8 +66,8 @@ def test_rate_limiter_falls_back_to_memory_when_no_redis():
     from slowapi import Limiter
     from slowapi.util import get_remote_address
 
-    l = Limiter(key_func=get_remote_address, storage_uri="memory://")
-    assert isinstance(l._storage, MemoryStorage)
+    test_limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
+    assert isinstance(test_limiter._storage, MemoryStorage)
 
 
 def test_rate_limiter_uses_redis_storage_when_url_set():
@@ -78,8 +75,8 @@ def test_rate_limiter_uses_redis_storage_when_url_set():
     from slowapi import Limiter
     from slowapi.util import get_remote_address
 
-    l = Limiter(key_func=get_remote_address, storage_uri="redis://localhost:6379")
-    assert not isinstance(l._storage, MemoryStorage)
+    test_limiter = Limiter(key_func=get_remote_address, storage_uri="redis://localhost:6379")
+    assert not isinstance(test_limiter._storage, MemoryStorage)
 
 
 # ── Fix C: scheduler_enabled ──────────────────────────────────────────────────
@@ -132,7 +129,10 @@ def test_scheduler_not_started_when_disabled(engine):
 # ── Fix E: /healthz — Ollama does not block core health ──────────────────────
 
 def test_healthz_returns_200_when_ollama_unreachable(client):
-    with patch("httpx.AsyncClient") as mock_client_class:
+    with (
+        patch("httpx.AsyncClient") as mock_client_class,
+        patch("app.automation.scheduler.scheduler.state", new=STATE_RUNNING),
+    ):
         mock_ac = AsyncMock()
         mock_ac.__aenter__ = AsyncMock(return_value=mock_ac)
         mock_ac.__aexit__ = AsyncMock(return_value=False)

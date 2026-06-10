@@ -11,7 +11,6 @@ The assign_role endpoint (PATCH /auth/users/{id}/role) is the only admin-gated
 endpoint currently in the codebase, so it is used as the fixture for hierarchy tests.
 An analyst-gated endpoint will be added with the automation module.
 """
-import pytest
 from tests.conftest import seed_user, get_token
 
 
@@ -96,7 +95,7 @@ def test_unauthenticated_blocked_from_admin_endpoint(client, engine):
 
 
 def test_viewer_blocked_from_admin_endpoint(client, engine):
-    viewer = seed_user(engine, "viewer1", "viewer")
+    seed_user(engine, "viewer1", "viewer")
     target = seed_user(engine, "target2", "viewer")
     token = get_token(client, "viewer1")
     resp = client.patch(
@@ -108,7 +107,7 @@ def test_viewer_blocked_from_admin_endpoint(client, engine):
 
 
 def test_analyst_blocked_from_admin_endpoint(client, engine):
-    analyst = seed_user(engine, "analyst1", "analyst")
+    seed_user(engine, "analyst1", "analyst")
     target = seed_user(engine, "target3", "viewer")
     token = get_token(client, "analyst1")
     resp = client.patch(
@@ -120,7 +119,7 @@ def test_analyst_blocked_from_admin_endpoint(client, engine):
 
 
 def test_admin_can_access_admin_endpoint(client, engine):
-    admin = seed_user(engine, "admin1", "admin")
+    seed_user(engine, "admin1", "admin")
     target = seed_user(engine, "target4", "viewer")
     token = get_token(client, "admin1")
     resp = client.patch(
@@ -133,7 +132,7 @@ def test_admin_can_access_admin_endpoint(client, engine):
 
 
 def test_invalid_role_rejected(client, engine):
-    admin = seed_user(engine, "admin2", "admin")
+    seed_user(engine, "admin2", "admin")
     target = seed_user(engine, "target5", "viewer")
     token = get_token(client, "admin2")
     resp = client.patch(

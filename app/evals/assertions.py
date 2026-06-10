@@ -1,4 +1,3 @@
-import json
 from app.evals.models import AssertionResult, EvalAssertion
 
 

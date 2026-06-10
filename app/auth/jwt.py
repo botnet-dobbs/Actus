@@ -4,10 +4,10 @@ import jwt
 from jwt import PyJWTError
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from app.config import get_settings
 from app.database import get_engine, get_session
-from app.auth.models import User, AuditLog, VALID_ROLES
+from app.auth.models import User, AuditLog
 import structlog
 
 log = structlog.get_logger()
@@ -77,7 +77,7 @@ async def get_current_user(
         token_version = payload.get("tv", 0)
     except PyJWTError:
         raise exc
-    user = session.exec(select(User).where(User.username == username, User.is_deleted == False)).first()
+    user = session.exec(select(User).where(User.username == username, col(User.is_deleted).is_(False))).first()
     if not user or not user.is_active:
         raise exc
     if token_version != user.token_version:

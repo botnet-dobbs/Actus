@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from typing import ClassVar
-from sqlmodel import SQLModel, Field, Session, select
+from sqlmodel import SQLModel, Field, Session, col, select
 from app.database import get_engine
 from app.context.models import AgentContext
 import structlog
@@ -59,7 +59,7 @@ def load_context(run_id: str) -> AgentContext | None:
         snap = session.exec(
             select(ContextSnapshot).where(
                 ContextSnapshot.run_id == run_id,
-                ContextSnapshot.is_deleted == False,
+                col(ContextSnapshot.is_deleted).is_(False),
             )
         ).first()
         if not snap:
@@ -75,7 +75,7 @@ def delete_context(run_id: str, deleted_by: int | None = None) -> bool:
         snap = session.exec(
             select(ContextSnapshot).where(
                 ContextSnapshot.run_id == run_id,
-                ContextSnapshot.is_deleted == False,
+                col(ContextSnapshot.is_deleted).is_(False),
             )
         ).first()
         if not snap:

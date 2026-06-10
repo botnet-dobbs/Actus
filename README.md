@@ -2,11 +2,11 @@
 
 **FastAPI-based multi-agent platform with LLM routing, RAG-powered context retrieval, and operational automation.**
 
-Actus is an internal automation platform. Deploy it, register agents for your operations, and let them work autonomously on your data. A self-hosted infrastructure layer your team owns and controls.
+Actus is a self-hosted automation platform that your team deploys and fully controls. Deploy it, register agents for your operations, and let them work autonomously on your data.
 
 Define agents in YAML for whatever you need to automate: analyse customer data, monitor servers, digest logs, process documents, generate reports. Each agent runs on a schedule or on demand, calls your internal tools, and reads your domain knowledge through RAG. Multiple agents run independently.
 
-Actus provides the platform, you bring the tools. A tool is a Python function decorated with `@tool` that connects an agent to your systems: your database, your APIs, your filesystem. The platform handles the agent loop, retries, timeouts, PII scrubbing, and observability. You write the functions that do the actual work.
+Actus provides the platform. You bring the tools. A tool is a Python function decorated with `@tool` that connects an agent to your systems: your database, your APIs, your filesystem. The platform handles the agent loop, retries, timeouts, PII scrubbing, and observability. You write the functions that do the actual work.
 
 ---
 
@@ -28,14 +28,10 @@ pytest + httpx
 ```bash
 git clone https://github.com/you/actus && cd actus
 
-cat > .env << 'EOF'
-SECRET_KEY=your-secret-key-here
-POSTGRES_PASSWORD=your-postgres-password-here
-GRAFANA_PASSWORD=your-grafana-password-here
-DEBUG=false
-EOF
+cp .env.example .env
+# Edit .env and set SECRET_KEY, POSTGRES_PASSWORD, and GRAFANA_PASSWORD
 
-make docker-up-d       # start all services in background
+make dev-d             # start all services in background (includes Ollama, hot-reload)
 make ollama-pull       # pull the model into the Ollama container (first run only)
 ```
 
@@ -55,21 +51,21 @@ curl http://localhost:8000/healthz
 |---|---|---|
 | Actus API | `http://localhost:8000` | API docs at `/docs` |
 | Prometheus | `http://localhost:9090` | Metrics storage |
-| Grafana | `http://localhost:3000` | Dashboards — login: `admin` / `GRAFANA_PASSWORD` |
+| Grafana | `http://localhost:3000` | Dashboards. Login: `admin` / `GRAFANA_PASSWORD` |
 
 **Commands:**
 
 | Command | What it does |
 |---|---|
-| `make docker-up` | Build (if needed) and start in foreground |
-| `make docker-up-d` | Start in background |
+| `make dev` | Build (if needed) and start in foreground |
+| `make dev-d` | Start in background |
 | `make docker-logs` | Tail all service logs |
 | `make docker-restart` | Restart Actus without rebuilding |
-| `make docker-rebuild` | Rebuild image and restart all services |
-| `make docker-down` | Stop and remove all containers |
+| `make dev-rebuild` | Rebuild image and restart all services |
+| `make dev-down` | Stop and remove all containers |
 | `make ollama-pull` | Pull a model into the Ollama container |
 
-Agent YAML files in `config/agents/` are volume-mounted — add or edit agents and `make docker-restart`, no rebuild needed. Database data persists in a Docker volume across restarts.
+Agent YAML files in `config/agents/` are volume-mounted. Add or edit agents, then run `make docker-restart`, no rebuild needed. Database data persists in a Docker volume across restarts.
 
 ---
 
@@ -105,7 +101,7 @@ WF_ID=$(curl -s -X POST http://localhost:8000/v1/automation/trigger/doc_qa \
 **Step 3 — Stream the result (or poll)**
 
 ```bash
-# Stream live events — closes automatically when the agent finishes
+# Stream live events.
 curl -N "http://localhost:8000/v1/automation/workflows/$WF_ID/stream" \
   -H "Authorization: Bearer $TOKEN"
 
@@ -118,7 +114,7 @@ watch -n 2 curl -s "http://localhost:8000/v1/automation/workflows/$WF_ID" \
 
 **How it works:** The agent calls `chunk_and_index_document` (parse + embed chunks into pgvector), then `search_document` (semantic retrieval), then composes an answer grounded in the retrieved passages, then calls `cleanup_document` to remove the session's vector index rows before signalling done.
 
-**SQLite dev mode:** Indexing and retrieval are no-ops on SQLite. The agent will respond that no document information was found — expected behaviour. Run with PostgreSQL for full functionality.
+**SQLite dev mode:** Indexing and retrieval are no-ops on SQLite. The agent will respond that no document information was found. This is expected in dev mode. Run with PostgreSQL for full functionality.
 
 ---
 
@@ -147,7 +143,9 @@ By default, `/v1/llm/*` accepts any LiteLLM-routable model string. Set `ALLOWED_
 Actus does not terminate TLS itself. Run it behind a reverse proxy (Caddy, nginx, Traefik) that:
 
 - Terminates TLS and forwards plain HTTP to the `actus` container.
-- Forwards the real client IP via `X-Forwarded-For`, the `actus` container's uvicorn is started with `--proxy-headers --forwarded-allow-ips=...` (see `docker-compose.yml` / `FORWARDED_ALLOW_IPS` in `.env.example`) so `request.client.host` (used in audit logs and rate-limit keys) reflects the real client, not the proxy. The default trusts the Docker bridge network range (`172.16.0.0/12`); narrow this to your proxy's actual address in production, and never set it to `*`. Anyone able to reach the `actus` container directly (e.g. the published port) could otherwise spoof their source IP.
+- Forwards the real client IP via `X-Forwarded-For`.
+
+For that real client IP to actually be used (it shows up in audit logs and rate-limit keys as `request.client.host`), the `actus` container's uvicorn must be started with `--proxy-headers --forwarded-allow-ips=...` (see `docker-compose.yml` and `FORWARDED_ALLOW_IPS` in `.env.example`). The default trusts the Docker bridge network range (`172.16.0.0/12`). Narrow this to your proxy's actual address in production, and never set it to `*`: anyone able to reach the `actus` container directly (e.g. the published port) could otherwise spoof their source IP.
 
 Minimal Caddy example:
 
@@ -162,6 +160,8 @@ Set `CORS_ORIGINS` to your public HTTPS origin(s), e.g. `CORS_ORIGINS=["https://
 ---
 
 ## Documentation
+
+See [docs/agents.md](docs/agents.md) for the full guide to building, registering, and testing agents: YAML config reference, the ReAct loop, RAG context, webhooks, and tool development.
 
 ## License
 

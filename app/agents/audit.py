@@ -68,7 +68,7 @@ class AgentRunLogResponse(BaseModel):
                 return []
         return v or []
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def duration_seconds(self) -> float | None:
         if self.completed_at and self.started_at:

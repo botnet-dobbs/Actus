@@ -47,7 +47,7 @@ def test_delete_user_requires_admin(client, engine):
 
 
 def test_delete_user_soft_deletes(client, engine):
-    admin = seed_user(engine, "admin3", "admin")
+    seed_user(engine, "admin3", "admin")
     target = seed_user(engine, "target2", "viewer")
     token = get_token(client, "admin3")
     resp = client.delete(f"/v1/auth/users/{target.id}", headers=auth_header(token))

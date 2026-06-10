@@ -1,7 +1,7 @@
 from typing import cast
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import ValidationError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from app.database import get_session
 from app.ontology.models import OntologyObjectBase
 from app.ontology.registry import get_type, list_types
@@ -31,7 +31,7 @@ def list_objects(
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown type: {type_name}")
     results = session.exec(
-        select(cls).where(cls.is_deleted == False).offset(offset).limit(limit)
+        select(cls).where(col(cls.is_deleted).is_(False)).offset(offset).limit(limit)
     ).all()
     return {"type": type_name, "count": len(results), "items": results}
 
@@ -84,10 +84,10 @@ def create_object(
         session.rollback()
         log.error("ontology_create_failed", type=type_name, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
-    background_tasks.add_task(index_object, type_name, obj.id, obj)  # pyright: ignore[reportAttributeAccessIssue]
+    background_tasks.add_task(index_object, type_name, obj.id, obj)  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     ip = request.client.host if request.client else None
-    write_audit_log(username=user.username, action="ontology_create", resource=f"{type_name}:{obj.id}", ip=ip)  # pyright: ignore[reportAttributeAccessIssue]
-    log.info("ontology_object_created", type=type_name, id=obj.id, by=user.username)  # pyright: ignore[reportAttributeAccessIssue]
+    write_audit_log(username=user.username, action="ontology_create", resource=f"{type_name}:{obj.id}", ip=ip)  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
+    log.info("ontology_object_created", type=type_name, id=obj.id, by=user.username)  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     return obj
 
 
@@ -122,7 +122,7 @@ def update_object(
         session.rollback()
         log.error("ontology_update_failed", type=type_name, id=object_id, error=str(e))
         raise HTTPException(status_code=422, detail=str(e))
-    background_tasks.add_task(index_object, type_name, obj.id, obj)  # pyright: ignore[reportAttributeAccessIssue]
+    background_tasks.add_task(index_object, type_name, obj.id, obj)  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     ip = request.client.host if request.client else None
     write_audit_log(username=user.username, action="ontology_update", resource=f"{type_name}:{object_id}", ip=ip)
     log.info("ontology_object_updated", type=type_name, id=object_id, by=user.username)

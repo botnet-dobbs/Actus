@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import CursorResult, delete
-from sqlmodel import Session, select, col, text
+from sqlmodel import Session, select, col
 from app.config import get_settings
 from app.database import get_engine
 from app.context.store import ContextSnapshot
@@ -27,7 +27,7 @@ async def purge_old_context_snapshots() -> int:
     with Session(get_engine()) as session:
         old = session.exec(
             select(ContextSnapshot).where(
-                ContextSnapshot.is_deleted == True,
+                col(ContextSnapshot.is_deleted).is_(True),
                 col(ContextSnapshot.deleted_at) < cutoff,
             )
         ).all()
@@ -66,7 +66,7 @@ async def purge_orphan_doc_chunks() -> int:
         with Session(get_engine()) as session:
             stale_types = session.exec(
                 select(VectorIndex.object_type)
-                .where(VectorIndex.object_type.like("doc:%"))  # pyright: ignore[reportAttributeAccessIssue]
+                .where(col(VectorIndex.object_type).like("doc:%"))
                 .where(VectorIndex.created_at < cutoff)
                 .distinct()
             ).all()

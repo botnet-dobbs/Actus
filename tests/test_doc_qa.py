@@ -1,11 +1,9 @@
 """Tests for the Document Q&A module: parser, tools, upload endpoint, and trigger integration."""
-import io
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from tests.conftest import get_token, seed_user
 
@@ -377,7 +375,7 @@ class TestTriggerExtraContext:
         return AgentConfig(id="doc_qa", name="Doc QA", tools=[], model="ollama/mistral")
 
     def test_extra_context_stored_in_workflow(self, client, engine):
-        from sqlmodel import Session, select
+        from sqlmodel import Session
         from app.context.models import Workflow
         seed_user(engine, "trig_user", "analyst")
         token = get_token(client, "trig_user")

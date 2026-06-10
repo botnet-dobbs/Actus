@@ -22,7 +22,7 @@ def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
         entity_types=[r.entity_type for r in results],
         count=len(results),
     )
-    anonymized = _anonymizer.anonymize(text=text, analyzer_results=results)  # pyright: ignore[reportArgumentType]
+    anonymized = _anonymizer.anonymize(text=text, analyzer_results=results)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     return anonymized.text, True
 
 

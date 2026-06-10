@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from sqlalchemy.orm import defer as sa_defer
 from app.agents.audit import AgentRunLog, AgentRunLogResponse, log_agent_run
 from app.agents.builder import get_agent, list_agents, reload_agents
@@ -311,7 +311,7 @@ async def list_workflows(
         query = query.where(Workflow.agent_id == agent_id)
     if status:
         query = query.where(Workflow.status == status)
-    query = query.order_by(Workflow.created_at.desc()).offset(offset).limit(limit)  # pyright: ignore[reportAttributeAccessIssue]
+    query = query.order_by(col(Workflow.created_at).desc()).offset(offset).limit(limit)
     return session.exec(query).all()
 
 
@@ -416,7 +416,7 @@ async def list_runs(
     session: Session = Depends(get_session),
     user: User = Depends(require_role("analyst")),
 ):
-    query = select(AgentRunLog).options(sa_defer(AgentRunLog.trace_json))
+    query = select(AgentRunLog).options(sa_defer(AgentRunLog.trace_json))  # type: ignore[arg-type]
     query = _apply_visibility(query, user, team_col=AgentRunLog.team_id, owner_col=AgentRunLog.triggered_by)
     if agent_id:
         query = query.where(AgentRunLog.agent_id == agent_id)
@@ -428,7 +428,7 @@ async def list_runs(
         query = query.where(AgentRunLog.started_at >= from_date)
     if to_date:
         query = query.where(AgentRunLog.started_at <= to_date)
-    query = query.order_by(AgentRunLog.started_at.desc()).offset(offset).limit(limit)  # pyright: ignore[reportAttributeAccessIssue]
+    query = query.order_by(col(AgentRunLog.started_at).desc()).offset(offset).limit(limit)
     return session.exec(query).all()
 
 

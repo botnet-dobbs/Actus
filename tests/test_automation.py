@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import hmac
 import uuid
@@ -630,7 +629,7 @@ def test_analyst_sees_own_workflows_only(client, engine):
 
 
 def test_analyst_sees_webhook_triggered_workflows(client, engine):
-    user1 = seed_user(engine, "vis_wf_hook", "analyst")
+    seed_user(engine, "vis_wf_hook", "analyst")
     token1 = get_token(client, "vis_wf_hook")
 
     # created_by=None means webhook/scheduled — visible to all analysts
@@ -642,7 +641,7 @@ def test_analyst_sees_webhook_triggered_workflows(client, engine):
 
 
 def test_analyst_cannot_see_other_analysts_workflow(client, engine):
-    user1 = seed_user(engine, "vis_wf_b1", "analyst")
+    seed_user(engine, "vis_wf_b1", "analyst")
     user2 = seed_user(engine, "vis_wf_b2", "analyst")
     token1 = get_token(client, "vis_wf_b1")
 
@@ -655,7 +654,7 @@ def test_analyst_cannot_see_other_analysts_workflow(client, engine):
 def test_admin_sees_all_workflows(client, engine):
     user1 = seed_user(engine, "vis_wf_adm1", "analyst")
     user2 = seed_user(engine, "vis_wf_adm2", "analyst")
-    admin = seed_user(engine, "vis_wf_admin", "admin")
+    seed_user(engine, "vis_wf_admin", "admin")
     token_admin = get_token(client, "vis_wf_admin")
 
     seed_workflow_full(engine, created_by=user1.id, status="completed")
@@ -684,7 +683,7 @@ def test_analyst_sees_own_runs_only(client, engine):
 
 
 def test_analyst_sees_webhook_triggered_runs(client, engine):
-    user1 = seed_user(engine, "vis_run_hook", "analyst")
+    seed_user(engine, "vis_run_hook", "analyst")
     token1 = get_token(client, "vis_run_hook")
 
     seed_run_log(engine, triggered_by=None)
@@ -695,7 +694,7 @@ def test_analyst_sees_webhook_triggered_runs(client, engine):
 
 
 def test_analyst_cannot_see_other_analysts_run(client, engine):
-    user1 = seed_user(engine, "vis_run_b1", "analyst")
+    seed_user(engine, "vis_run_b1", "analyst")
     user2 = seed_user(engine, "vis_run_b2", "analyst")
     token1 = get_token(client, "vis_run_b1")
 
@@ -783,7 +782,7 @@ def test_trace_endpoint_returns_iterations(client, engine):
 
 
 def test_trace_endpoint_analyst_cannot_see_others_trace(client, engine):
-    user1 = seed_user(engine, "trace_own", "analyst")
+    seed_user(engine, "trace_own", "analyst")
     user2 = seed_user(engine, "trace_other", "analyst")
     token1 = get_token(client, "trace_own")
     run_id = seed_run_with_trace(engine, triggered_by=user2.id, trace=[])
@@ -885,7 +884,6 @@ def test_stream_wrong_team_yields_error_event(client, engine):
 
 def test_trace_endpoint_handles_old_list_format(client, engine):
     """Old trace_json stored as a plain list — backward compat must still work."""
-    import json as _json
     user = seed_user(engine, "trace_compat", "analyst")
     token = get_token(client, "trace_compat")
     old_format_trace = [
@@ -958,7 +956,7 @@ def test_list_teams(client, engine):
 
 
 def test_assign_team_to_user(client, engine):
-    admin = seed_user(engine, "team_adm_assign", "admin")
+    seed_user(engine, "team_adm_assign", "admin")
     analyst = seed_user(engine, "team_user_assign", "analyst")
     token = get_token(client, "team_adm_assign")
     # create team
@@ -972,7 +970,7 @@ def test_assign_team_to_user(client, engine):
 
 
 def test_assign_team_nonexistent_team(client, engine):
-    admin = seed_user(engine, "team_adm_bad", "admin")
+    seed_user(engine, "team_adm_bad", "admin")
     analyst = seed_user(engine, "team_user_bad", "analyst")
     token = get_token(client, "team_adm_bad")
     resp = client.patch(f"/v1/auth/users/{analyst.id}/team",
@@ -981,7 +979,7 @@ def test_assign_team_nonexistent_team(client, engine):
 
 
 def test_remove_team_from_user(client, engine):
-    admin = seed_user(engine, "team_adm_rem", "admin")
+    seed_user(engine, "team_adm_rem", "admin")
     analyst = seed_user(engine, "team_user_rem", "analyst")
     token = get_token(client, "team_adm_rem")
     # create and assign

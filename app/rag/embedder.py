@@ -12,6 +12,8 @@ _model: SentenceTransformer | None = None
 
 def warmup() -> None:
     global _model
+    if _model is not None:
+        return
     log.info("embedding_model_loading", model=_settings.embedding_model)
     _model = SentenceTransformer(_settings.embedding_model)
     log.info("embedding_model_loaded", model=_settings.embedding_model)

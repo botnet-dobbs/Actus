@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import app.database as db_module
 from app.main import create_app
 from app.database import get_session
@@ -17,12 +17,6 @@ def engine():
         poolclass=StaticPool,
     )
     # Import all table models before create_all so metadata is populated
-    import app.auth.models
-    import app.ontology.models
-    import app.context.store
-    import app.context.models
-    import app.agents.audit
-    import app.rag.models
     SQLModel.metadata.create_all(test_engine)
 
     original = db_module._engine
@@ -40,12 +34,18 @@ def client(engine):
 
     # instrument_app registers Prometheus metrics into the global registry.
     # Re-registering on each test raises ValueError, so we suppress it in tests.
-    with patch("app.main.instrument_app"):
+    # start_scheduler/stop_scheduler are also patched out: the real scheduler
+    # uses a Postgres-backed jobstore, which would hit a real DB on every test.
+    # Both patches must stay active through TestClient's lifespan (entered below),
+    # since app.main.lifespan looks up these names at call time, not at create_app() time.
+    with patch("app.main.instrument_app"), \
+            patch("app.main.start_scheduler"), \
+            patch("app.main.stop_scheduler", new=AsyncMock()):
         application = create_app()
-    application.dependency_overrides[get_session] = override_session
+        application.dependency_overrides[get_session] = override_session
 
-    with TestClient(application, raise_server_exceptions=False) as c:
-        yield c
+        with TestClient(application, raise_server_exceptions=False) as c:
+            yield c
 
     application.dependency_overrides.clear()
 
