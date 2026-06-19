@@ -220,6 +220,11 @@ async def _run_agent_inner(
             bound_log.warning("agent_context_pii_scrubbed")
         messages.append({"role": "user", "content": f"Context: {clean_context}"})
 
+    # Anthropic requires at least one user message alongside the system message.
+    # Scheduled agents with no extra_context and no RAG query would otherwise fail.
+    if len(messages) == 1:
+        messages.append({"role": "user", "content": "Begin."})
+
     def _try_save_context() -> None:
         try:
             save_context(context)
