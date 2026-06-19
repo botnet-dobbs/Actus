@@ -85,6 +85,7 @@ Two advanced fields aren't shown above because most agents don't need them: `out
 | `system_prompt` | str | `""` | The agent's instructions; effectively required for any real agent |
 | `api_base` | str | `""` | Overrides `OLLAMA_BASE_URL` for this agent |
 | `schedule.cron` | str | None | Optional. APScheduler cron expression, see [Scheduling agents](#scheduling-agents) |
+| `schedule.misfire_grace_time` | int \| null | null (uses 3600) | How many seconds after a missed fire Actus will still replay it on restart. Set to `0` to never replay. See [Missed fires on restart](#missed-fires-on-restart) |
 | `webhook.secret` | str | None | Optional. HMAC-SHA256 secret; enables `POST /v1/automation/webhooks/{id}` |
 | `output_schema` | dict (JSON Schema) | None | Optional. If set, the agent's final result must validate against this schema. An invalid result is sent back to the agent for correction (up to 2 retries) |
 | `native_tools` | bool | None | Optional. Force native function-calling on (`true`) or off (`false`). By default, non-Ollama models use native tool calling and `ollama/*` models use the JSON protocol described in [The ReAct loop](#the-react-loop) |
@@ -190,6 +191,34 @@ A few things to keep in mind for scheduled agents:
 - **No input context.** Scheduled runs always start with empty `extra_context`. The agent can't be handed data at trigger time, so it should get everything it needs from its tools, the ontology, or RAG search.
 - **No live stream.** There's no workflow to watch and no `/stream` endpoint for scheduled runs. Check the outcome via the audit log (`/v1/automation/runs`).
 - **Restart to apply.** Schedules are loaded once when the server starts. Adding or changing `schedule.cron` requires a server restart, not just `POST /v1/automation/reload`.
+
+### Missed fires on restart
+
+When Actus restarts, APScheduler checks whether any scheduled jobs were missed while the server was down. If a missed job falls within `misfire_grace_time` seconds of the current time, APScheduler runs it immediately.
+
+The default is **3600 seconds** (1 hour). This is fine for most agents. A purge job or a weekly report that was missed should usually just run when the server comes back up.
+
+**Set `misfire_grace_time: 0` when replaying a missed run would cause a problem.** For example, a trading agent or an email sender should not run automatically with old data after a restart. Setting it to `0` tells APScheduler to skip the missed run entirely.
+
+```yaml
+# Safe to replay: running a purge job late is fine
+schedule:
+  cron: "0 2 * * *"           # nightly at 02:00 UTC
+  # misfire_grace_time not set, so the default of 3600 applies
+
+# Not safe to replay: skip it if the window was missed
+schedule:
+  cron: "0 15 * * 1-5"        # weekdays at 10:00 ET
+  misfire_grace_time: 0        # missed fires are dropped, not replayed
+```
+
+| Agent type | Recommended setting | Why |
+|---|---|---|
+| Purge / housekeeping | omit (default 3600) | Running it late does no harm |
+| Reports / summaries | omit or `7200` | Better late than never |
+| Trading, billing, notifications | `0` | Running with stale inputs could cause duplicate or unintended actions |
+
+Note: `misfire_grace_time` only controls what happens to missed fires on restart. It does not prevent two runs from overlapping. Overlap is controlled separately by APScheduler's `max_instances` (default: 1 per process).
 
 ---
 

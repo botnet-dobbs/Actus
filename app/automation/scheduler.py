@@ -35,15 +35,17 @@ def start_scheduler() -> None:
     register_all_jobs(scheduler)
     for config in list_agents():
         if config.schedule and config.schedule.cron:
+            grace = config.schedule.misfire_grace_time if config.schedule.misfire_grace_time is not None else 3600
             scheduler.add_job(
                 _make_agent_job(config.id),
                 CronTrigger.from_crontab(config.schedule.cron),
                 id=f"agent_{config.id}",
                 replace_existing=True,
-                misfire_grace_time=3600,
+                misfire_grace_time=grace,
                 coalesce=True,
             )
-            log.info("agent_job_registered", agent_id=config.id, cron=config.schedule.cron)
+            log.info("agent_job_registered", agent_id=config.id, cron=config.schedule.cron,
+                     misfire_grace_time=grace)
     scheduler.start()
     log.info("scheduler_started", job_count=len(scheduler.get_jobs()))
 

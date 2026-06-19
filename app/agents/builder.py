@@ -36,6 +36,7 @@ log = structlog.get_logger()
 
 class AgentSchedule(BaseModel):
     cron: str | None = None
+    misfire_grace_time: int | None = None  # seconds; None = never replay missed fires
 
 
 class WebhookConfig(BaseModel):
